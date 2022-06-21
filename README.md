@@ -3,7 +3,7 @@ Code to support publication "Patterns of phenotypic plasticity along a thermal g
 
 This repository contains R code for analyses conducted and figures produced for a forthcoming publication in Functional Ecology that examined the response of 14 traits to a high-resolution thermal gradient in an alpine plant, from seed germination to flower production.
 
-* Please note that the R code is currently available as a single long Rmarkdown script to demonstrate the structure of the data analyses conducted and figures in the manuscript. It is not functional standalone as-is. I will include additional data files, model outputs, and html markdown outputs to demonstrate it's complete functionality in due course, when possible.
+* Please note that the R code is currently available as a single long Rmarkdown script (Patterns of plasticity Rmarkdown file) to demonstrate the structure of the data analyses conducted and figures in the manuscript. It may not be entirely functional standalone as-is. I have included additional data files from whcih it should be possible to run the code within the Rmarkdown but saved large model outputs and an html markdown are not up at this stage (will aim to add at a later date).
 
 
 Abstract
