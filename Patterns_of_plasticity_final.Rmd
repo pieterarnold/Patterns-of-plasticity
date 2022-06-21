@@ -1,0 +1,3381 @@
+---
+title: "Patterns of plasticity"
+author: "Pieter Arnold"
+date: "21/06/2022"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+
+```{r setup load libraries}
+library(MCMCglmm)
+library(ggplot2)
+library(ggpubr)
+library(MuMIn)
+library(viridis)
+library(brms)
+library(extrafont)
+library(png)
+
+# Stan options to optimise brms with multicore CPUs
+options(mc.cores = parallel::detectCores())
+options(buildtools.check = function(action) TRUE)
+
+```
+
+
+```{r load data}
+
+F2germ <- read.csv("F2germ_rev.csv")
+
+F2germ$Row <- as.factor(F2germ$Row)
+F2germ$Column <- as.factor(F2germ$Column)
+F2germ$Line <- as.factor(F2germ$Line)
+F2germ$Block <- as.factor(F2germ$Block)
+F2germ$Total_seed <- as.numeric(as.character(F2germ$Total_seed))
+F2germ$Germ <- as.numeric(as.character(F2germ$Germ))
+F2germ$cTemp <- scale(F2germ$Temp)
+F2germ$cTemp2 <- F2germ$cTemp^2
+F2germ$animal <- as.factor(F2germ$F2_ID)
+F2germ$Mother <- as.factor(F2germ$Mother)
+
+F2data <- read.csv("F2growth.csv")
+
+Column_1 <- (paste(F2data$Column[F2data$Block=="1"],"_1", sep = ""))
+Column_2 <- (paste(F2data$Column[F2data$Block=="2"],"_2", sep = ""))
+F2data$ColumnID <- as.factor(c(Column_1, Column_2))
+Row_1 <- (paste(F2data$Row[F2data$Block=="1"],"_1", sep = ""))
+Row_2 <- (paste(F2data$Row[F2data$Block=="2"],"_2", sep = ""))
+F2data$RowID <- as.factor(c(Row_1, Row_2))
+F2data$animal <- as.factor(F2data$F2_ID)
+F2data$Mother <- as.factor(F2data$Mother)
+
+F2data$Line <- as.factor(F2data$Line)
+F2data$Block <- as.factor(F2data$Block)
+F2data$N_flowers_caps <- as.numeric(as.character(F2data$N_flowers_caps))
+F2data$Above_ground_biomass_g <- as.numeric(as.character(F2data$Above_ground_biomass_g))
+
+Ped <- read.csv("F2_TGP_pedigree.csv")
+
+for(x in 1:3) Ped[,x] <- as.factor(Ped[,x])
+
+inv.phylo <- MCMCglmm::inverseA(Ped)
+A <- solve(inv.phylo$Ainv)
+rownames(A) <- rownames(inv.phylo$Ainv)
+
+```
+
+
+
+```{r run germ models part 1}
+
+hist(F2germ$Germ, breaks = 30)
+
+# Part (i) population-level
+germ_gam <- brm(Germ ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_gam <- add_criterion(germ_gam, c("loo", "waic"))
+print(summary(germ_gam), digits = 3)
+loo(germ_gam)
+plot(loo(germ_gam))
+save(germ_gam, file = "large model outputs R1/germ_gam.Rdata")
+
+
+germ_quad <- brm(Germ ~ cTemp + cTemp2 +
+                    (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_quad <- add_criterion(germ_quad, c("loo", "waic"))
+print(summary(germ_quad), digits = 3)
+loo(germ_quad)
+plot(loo(germ_quad))
+save(germ_quad, file = "large model outputs R1/germ_quad.Rdata")
+
+
+germ_lm <- brm(Germ ~ cTemp + 
+                     (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_lm <- add_criterion(germ_lm, c("loo", "waic"))
+print(summary(germ_lm), digits = 3)
+loo(germ_lm)
+plot(loo(germ_lm))
+save(germ_lm, file = "large model outputs R1/germ_lm.Rdata")
+
+
+```
+
+
+``` {r load germ models part 1 and model selection}
+
+germ_gam <- get(load("large model outputs R1/germ_gam.Rdata"))
+germ_quad <- get(load("large model outputs R1/germ_quad.Rdata"))
+germ_lm <- get(load("large model outputs R1/germ_lm.Rdata"))
+
+# LOO and stacking model selection
+germ_loo <- loo_compare(germ_gam, germ_quad, germ_lm, criterion = "loo")
+germ_weights <- loo_model_weights(germ_gam, germ_quad, germ_lm)
+
+germ_loo
+germ_weights
+
+```
+
+
+
+``` {r run germ models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+germ_gam_intA_intM <- germ_gam
+save(germ_gam_intA_intM, file = "large model outputs R1/germ_gam_intA_intM.Rdata")
+
+germ_gam_intA_rrM <- brm(Germ ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1+cTemp|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_gam_intA_rrM <- add_criterion(germ_gam_intA_rrM, c("loo", "waic"))
+print(summary(germ_gam_intA_rrM), digits = 3)
+loo(germ_gam_intA_rrM)
+plot(loo(germ_gam_intA_rrM))
+save(germ_gam_intA_rrM, file = "large model outputs R1/germ_gam_intA_rrM.Rdata")
+
+
+germ_gam_rrA_rrM <- brm(Germ ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1+cTemp|Mother) + (1+cTemp|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_gam_rrA_rrM <- add_criterion(germ_gam_rrA_rrM, c("loo", "waic"))
+print(summary(germ_gam_rrA_rrM), digits = 3)
+loo(germ_gam_rrA_rrM)
+plot(loo(germ_gam_rrA_rrM))
+save(germ_gam_rrA_rrM, file = "large model outputs R1/germ_gam_rrA_rrM.Rdata")
+
+
+germ_gam_rrA_intM <- brm(Germ ~ s(cTemp, k = 8, bs = "tp") + 
+                           (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1+cTemp|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+germ_gam_rrA_intM <- add_criterion(germ_gam_rrA_intM, c("loo", "waic"))
+print(summary(germ_gam_rrA_intM), digits = 3)
+loo(germ_gam_rrA_intM)
+plot(loo(germ_gam_rrA_intM))
+save(germ_gam_rrA_intM, file = "large model outputs R1/germ_gam_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load germ models part 2 and model selection}
+
+germ_gam_intA_intM <- get(load("large model outputs R1/germ_gam_intA_intM.Rdata"))
+germ_gam_intA_rrM <- get(load("large model outputs R1/germ_gam_intA_rrM.Rdata"))
+germ_gam_rrA_rrM <- get(load("large model outputs R1/germ_gam_rrA_rrM.Rdata"))
+germ_gam_rrA_intM <- get(load("large model outputs R1/germ_gam_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+germ_loo2 <- loo_compare(germ_gam_intA_intM, germ_gam_intA_rrM, 
+                          germ_gam_rrA_rrM, germ_gam_rrA_intM, criterion = "loo")
+germ_weights2 <- loo_model_weights(germ_gam_intA_intM, germ_gam_intA_rrM, 
+                          germ_gam_rrA_rrM, germ_gam_rrA_intM)
+
+germ_loo2
+germ_weights2
+
+```
+
+
+```{r final germ model for interpretation}
+
+print(summary(germ_gam_rrA_intM), digits = 2)
+
+```
+
+
+```{r run mgt models part 1}
+
+hist(log(F2germ$MGT), breaks = 30)
+
+# Part (i) population-level
+mgt_gam <- brm(log(MGT) ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_gam <- add_criterion(mgt_gam, c("loo", "waic"))
+print(summary(mgt_gam), digits = 3)
+loo(mgt_gam)
+plot(loo(mgt_gam))
+save(mgt_gam, file = "large model outputs R1/mgt_gam.Rdata")
+
+
+mgt_quad <- brm(log(MGT) ~ cTemp + cTemp2 +
+                    (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_quad <- add_criterion(mgt_quad, c("loo", "waic"))
+print(summary(mgt_quad), digits = 3)
+loo(mgt_quad)
+plot(loo(mgt_quad))
+save(mgt_quad, file = "large model outputs R1/mgt_quad.Rdata")
+
+
+mgt_lm <- brm(log(MGT) ~ cTemp + 
+                     (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_lm <- add_criterion(mgt_lm, c("loo", "waic"))
+print(summary(mgt_lm), digits = 3)
+loo(mgt_lm)
+plot(loo(mgt_lm))
+save(mgt_lm, file = "large model outputs R1/mgt_lm.Rdata")
+
+
+```
+
+
+``` {r load mgt models part 1 and model selection}
+
+mgt_gam <- get(load("large model outputs R1/mgt_gam.Rdata"))
+mgt_quad <- get(load("large model outputs R1/mgt_quad.Rdata"))
+mgt_lm <- get(load("large model outputs R1/mgt_lm.Rdata"))
+
+# LOO and stacking model selection
+mgt_loo <- loo_compare(mgt_gam, mgt_quad, mgt_lm, criterion = "loo")
+mgt_weights <- loo_model_weights(mgt_gam, mgt_quad, mgt_lm)
+
+mgt_loo
+mgt_weights
+
+```
+
+
+
+``` {r run mgt models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+mgt_gam_intA_intM <- mgt_gam
+save(mgt_gam_intA_intM, file = "large model outputs R1/mgt_gam_intA_intM.Rdata")
+
+mgt_gam_intA_rrM <- brm(log(MGT) ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1+cTemp|Mother) + (1|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_gam_intA_rrM <- add_criterion(mgt_gam_intA_rrM, c("loo", "waic"))
+print(summary(mgt_gam_intA_rrM), digits = 3)
+loo(mgt_gam_intA_rrM)
+plot(loo(mgt_gam_intA_rrM))
+save(mgt_gam_intA_rrM, file = "large model outputs R1/mgt_gam_intA_rrM.Rdata")
+
+
+mgt_gam_rrA_rrM <- brm(log(MGT) ~ s(cTemp, k = 8, bs = "tp") + 
+                     (1|Block) + (1|Row) + (1|Column) + (1+cTemp|Mother) + (1+cTemp|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_gam_rrA_rrM <- add_criterion(mgt_gam_rrA_rrM, c("loo", "waic"))
+print(summary(mgt_gam_rrA_rrM), digits = 3)
+loo(mgt_gam_rrA_rrM)
+plot(loo(mgt_gam_rrA_rrM))
+save(mgt_gam_rrA_rrM, file = "large model outputs R1/mgt_gam_rrA_rrM.Rdata")
+
+
+mgt_gam_rrA_intM <- brm(log(MGT) ~ s(cTemp, k = 8, bs = "tp") + 
+                           (1|Block) + (1|Row) + (1|Column) + (1|Mother) + (1+cTemp|gr(animal, cov = A)),
+                 data = F2germ, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+mgt_gam_rrA_intM <- add_criterion(mgt_gam_rrA_intM, c("loo", "waic"))
+print(summary(mgt_gam_rrA_intM), digits = 3)
+loo(mgt_gam_rrA_intM)
+plot(loo(mgt_gam_rrA_intM))
+save(mgt_gam_rrA_intM, file = "large model outputs R1/mgt_gam_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load mgt models part 2 and model selection}
+
+mgt_gam_intA_intM <- get(load("large model outputs R1/mgt_gam_intA_intM.Rdata"))
+mgt_gam_intA_rrM <- get(load("large model outputs R1/mgt_gam_intA_rrM.Rdata"))
+mgt_gam_rrA_rrM <- get(load("large model outputs R1/mgt_gam_rrA_rrM.Rdata"))
+mgt_gam_rrA_intM <- get(load("large model outputs R1/mgt_gam_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+mgt_loo2 <- loo_compare(mgt_gam_intA_intM, mgt_gam_intA_rrM, 
+                          mgt_gam_rrA_rrM, mgt_gam_rrA_intM, criterion = "loo")
+mgt_weights2 <- loo_model_weights(mgt_gam_intA_intM, mgt_gam_intA_rrM, 
+                          mgt_gam_rrA_rrM, mgt_gam_rrA_intM)
+
+mgt_loo2
+mgt_weights2
+
+```
+
+
+```{r final mgt model for interpretation}
+
+print(summary(mgt_gam_intA_rrM), digits = 2)
+
+```
+
+
+
+```{r run chlcon models part 1}
+
+# Part (i) population-level
+chlcon_gam <- brm(Chlorophyll_content_etr ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_gam <- add_criterion(chlcon_gam, c("loo", "waic"))
+print(summary(chlcon_gam), digits = 3)
+loo(chlcon_gam)
+plot(loo(chlcon_gam))
+save(chlcon_gam, file = "large model outputs R1/chlcon_gam.Rdata")
+
+
+chlcon_quad <- brm(Chlorophyll_content_etr ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_quad <- add_criterion(chlcon_quad, c("loo", "waic"))
+print(summary(chlcon_quad), digits = 3)
+loo(chlcon_quad)
+plot(loo(chlcon_quad))
+save(chlcon_quad, file = "large model outputs R1/chlcon_quad.Rdata")
+
+
+chlcon_lm <- brm(Chlorophyll_content_etr ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_lm <- add_criterion(chlcon_lm, c("loo", "waic"))
+print(summary(chlcon_lm), digits = 3)
+loo(chlcon_lm)
+plot(loo(chlcon_lm))
+save(chlcon_lm, file = "large model outputs R1/chlcon_lm.Rdata")
+
+
+```
+
+
+``` {r load chlcon models part 1 and model selection}
+
+chlcon_gam <- get(load("large model outputs R1/chlcon_gam.Rdata"))
+chlcon_quad <- get(load("large model outputs R1/chlcon_quad.Rdata"))
+chlcon_lm <- get(load("large model outputs R1/chlcon_lm.Rdata"))
+
+# LOO and stacking model selection
+chlcon_loo <- loo_compare(chlcon_gam, chlcon_quad, chlcon_lm, criterion = "loo")
+chlcon_weights <- loo_model_weights(chlcon_gam, chlcon_quad, chlcon_lm)
+
+chlcon_loo
+chlcon_weights
+
+```
+
+
+``` {r run chlcon models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+chlcon_quad_intA_intM <- chlcon_quad
+save(chlcon_quad_intA_intM, file = "large model outputs R1/chlcon_quad_intA_intM.Rdata")
+
+chlcon_quad_intA_rrM <- brm(Chlorophyll_content_etr ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_quad_intA_rrM <- add_criterion(chlcon_quad_intA_rrM, c("loo", "waic"))
+print(summary(chlcon_quad_intA_rrM), digits = 3)
+loo(chlcon_quad_intA_rrM)
+plot(loo(chlcon_quad_intA_rrM))
+save(chlcon_quad_intA_rrM, file = "large model outputs R1/chlcon_quad_intA_rrM.Rdata")
+
+
+chlcon_quad_rrA_rrM <- brm(Chlorophyll_content_etr ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_quad_rrA_rrM <- add_criterion(chlcon_quad_rrA_rrM, c("loo", "waic"))
+print(summary(chlcon_quad_rrA_rrM), digits = 3)
+loo(chlcon_quad_rrA_rrM)
+plot(loo(chlcon_quad_rrA_rrM))
+save(chlcon_quad_rrA_rrM, file = "large model outputs R1/chlcon_quad_rrA_rrM.Rdata")
+
+
+chlcon_quad_rrA_intM <- brm(Chlorophyll_content_etr ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+chlcon_quad_rrA_intM <- add_criterion(chlcon_quad_rrA_intM, c("loo", "waic"))
+print(summary(chlcon_quad_rrA_intM), digits = 3)
+loo(chlcon_quad_rrA_intM)
+plot(loo(chlcon_quad_rrA_intM))
+save(chlcon_quad_rrA_intM, file = "large model outputs R1/chlcon_quad_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load chlcon models part 2 and model selection}
+
+chlcon_quad_intA_intM <- get(load("large model outputs R1/chlcon_quad_intA_intM.Rdata"))
+chlcon_quad_intA_rrM <- get(load("large model outputs R1/chlcon_quad_intA_rrM.Rdata"))
+chlcon_quad_rrA_rrM <- get(load("large model outputs R1/chlcon_quad_rrA_rrM.Rdata"))
+chlcon_quad_rrA_intM <- get(load("large model outputs R1/chlcon_quad_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+chlcon_loo2 <- loo_compare(chlcon_quad_intA_intM, chlcon_quad_intA_rrM, 
+                          chlcon_quad_rrA_rrM, chlcon_quad_rrA_intM, criterion = "loo")
+chlcon_weights2 <- loo_model_weights(chlcon_quad_intA_intM, chlcon_quad_intA_rrM, 
+                          chlcon_quad_rrA_rrM, chlcon_quad_rrA_intM)
+
+chlcon_loo2
+chlcon_weights2
+
+```
+
+```{r final chlcon model for interpretation}
+
+print(summary(chlcon_quad_intA_intM), digits = 2)
+
+```
+
+
+
+``` {r chlcon figure}
+# Chlorophyll content: best model = chlcon_quad_intA_intM
+
+predicted_data <- data.frame(Chlorophyll_content_etr = F2data$Chlorophyll_content_etr,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_chlcon <- predict(chlcon_quad_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_chlcon <- predict(chlcon_quad_intA_intM, re.form = ~(1|animal))[,1]
+
+chlcon_fig <- 
+ggplot(F2data, aes(x = Temp_rosette, y = Chlorophyll_content_etr)) +
+  stat_smooth(data = predicted_data, 
+              aes(x = Temp_rosette, y = pred_line_chlcon, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Chlorophyll_content_etr, 
+                 group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_chlcon),
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") + 
+  stat_summary(fun.data = "mean_se", size = 0.7) +
+  ylab(bquote(atop(Chlorophyll~content,(SPAD~units)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5))
+# + guides(colour = guide_legend(nrow = 3))
+
+chlcon_fig
+
+```
+
+
+```{r run lma models part 1}
+
+# Part (i) population-level
+lma_gam <- brm(LMAmean ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_gam <- add_criterion(lma_gam, c("loo", "waic"))
+print(summary(lma_gam), digits = 3)
+loo(lma_gam)
+plot(loo(lma_gam))
+save(lma_gam, file = "large model outputs R1/lma_gam.Rdata")
+
+
+lma_quad <- brm(LMAmean ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_quad <- add_criterion(lma_quad, c("loo", "waic"))
+print(summary(lma_quad), digits = 3)
+loo(lma_quad)
+plot(loo(lma_quad))
+save(lma_quad, file = "large model outputs R1/lma_quad.Rdata")
+
+
+lma_lm <- brm(LMAmean ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_lm <- add_criterion(lma_lm, c("loo", "waic"))
+print(summary(lma_lm), digits = 3)
+loo(lma_lm)
+plot(loo(lma_lm))
+save(lma_lm, file = "large model outputs R1/lma_lm.Rdata")
+
+# replicate models that include intial diameter
+lma_gam_init <- brm(LMAmean ~ s(cTemp_rosette, k = 8, bs = "tp") + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_gam_init <- add_criterion(lma_gam_init, c("loo", "waic"))
+print(summary(lma_gam_init), digits = 3)
+loo(lma_gam_init)
+plot(loo(lma_gam_init))
+save(lma_gam, file = "large model outputs R1/lma_gam_init.Rdata")
+
+
+lma_quad_init <- brm(LMAmean ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_quad_init <- add_criterion(lma_quad_init, c("loo", "waic"))
+print(summary(lma_quad_init), digits = 3)
+loo(lma_quad_init)
+plot(loo(lma_quad_init))
+save(lma_quad_init, file = "large model outputs R1/lma_quad_init.Rdata")
+
+
+lma_lm_init <- brm(LMAmean ~ cTemp_rosette + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_lm_init <- add_criterion(lma_lm_init, c("loo", "waic"))
+print(summary(lma_lm_init), digits = 3)
+loo(lma_lm_init)
+plot(loo(lma_lm_init))
+save(lma_lm_init, file = "large model outputs R1/lma_lm_init.Rdata")
+
+```
+
+
+``` {r load lma models part 1 and model selection}
+
+lma_gam <- get(load("large model outputs R1/lma_gam.Rdata"))
+lma_quad <- get(load("large model outputs R1/lma_quad.Rdata"))
+lma_lm <- get(load("large model outputs R1/lma_lm.Rdata"))
+lma_gam_init <- get(load("large model outputs R1/lma_gam_init.Rdata"))
+lma_quad_init <- get(load("large model outputs R1/lma_quad_init.Rdata"))
+lma_lm_init <- get(load("large model outputs R1/lma_lm_init.Rdata"))
+
+# LOO and stacking model selection
+lma_loo <- loo_compare(lma_gam, lma_quad, lma_lm, 
+                       lma_gam_init, lma_quad_init, lma_lm_init, criterion = "loo")
+lma_weights <- loo_model_weights(lma_gam, lma_quad, lma_lm,
+                                 lma_gam_init, lma_quad_init, lma_lm_init)
+
+lma_loo
+lma_weights
+
+```
+
+
+``` {r run lma models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+lma_quad_init_intA_intM <- lma_quad_init
+save(lma_quad_init_intA_intM, file = "large model outputs R1/lma_quad_init_intA_intM.Rdata")
+
+lma_quad_init_intA_rrM <- brm(LMAmean ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_quad_init_intA_rrM <- add_criterion(lma_quad_init_intA_rrM, c("loo", "waic"))
+print(summary(lma_quad_init_intA_rrM), digits = 3)
+loo(lma_quad_init_intA_rrM)
+plot(loo(lma_quad_init_intA_rrM))
+save(lma_quad_init_intA_rrM, file = "large model outputs R1/lma_quad_init_intA_rrM.Rdata")
+
+
+lma_quad_init_rrA_rrM <- brm(LMAmean ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_quad_init_rrA_rrM <- add_criterion(lma_quad_init_rrA_rrM, c("loo", "waic"))
+print(summary(lma_quad_init_rrA_rrM), digits = 3)
+loo(lma_quad_init_rrA_rrM)
+plot(loo(lma_quad_init_rrA_rrM))
+save(lma_quad_init_rrA_rrM, file = "large model outputs R1/lma_quad_init_rrA_rrM.Rdata")
+
+
+lma_quad_init_rrA_intM <- brm(LMAmean ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+lma_quad_init_rrA_intM <- add_criterion(lma_quad_init_rrA_intM, c("loo", "waic"))
+print(summary(lma_quad_init_rrA_intM), digits = 3)
+loo(lma_quad_init_rrA_intM)
+plot(loo(lma_quad_init_rrA_intM))
+save(lma_quad_init_rrA_intM, file = "large model outputs R1/lma_quad_init_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load lma models part 2 and model selection}
+
+lma_quad_init_intA_intM <- get(load("large model outputs R1/lma_quad_init_intA_intM.Rdata"))
+lma_quad_init_intA_rrM <- get(load("large model outputs R1/lma_quad_init_intA_rrM.Rdata"))
+lma_quad_init_rrA_rrM <- get(load("large model outputs R1/lma_quad_init_rrA_rrM.Rdata"))
+lma_quad_init_rrA_intM <- get(load("large model outputs R1/lma_quad_init_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+lma_loo2 <- loo_compare(lma_quad_init_intA_intM, lma_quad_init_intA_rrM, 
+                          lma_quad_init_rrA_rrM, lma_quad_init_rrA_intM, criterion = "loo")
+lma_weights2 <- loo_model_weights(lma_quad_init_intA_intM, lma_quad_init_intA_rrM, 
+                          lma_quad_init_rrA_rrM, lma_quad_init_rrA_intM)
+
+lma_loo2
+lma_weights2
+
+```
+
+
+```{r final lma model for interpretation}
+
+print(summary(lma_quad_init_intA_intM), digits = 4)
+
+```
+
+
+
+```{r run rosette models part 1}
+
+# Part (i) population-level
+rosette_gam <- brm(Early_growth10 ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_gam <- add_criterion(rosette_gam, c("loo", "waic"))
+print(summary(rosette_gam), digits = 3)
+loo(rosette_gam)
+plot(loo(rosette_gam))
+save(rosette_gam, file = "large model outputs R1/rosette_gam.Rdata")
+
+
+rosette_quad <- brm(Early_growth10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_quad <- add_criterion(rosette_quad, c("loo", "waic"))
+print(summary(rosette_quad), digits = 3)
+loo(rosette_quad)
+plot(loo(rosette_quad))
+save(rosette_quad, file = "large model outputs R1/rosette_quad.Rdata")
+
+
+rosette_lm <- brm(Early_growth10 ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_lm <- add_criterion(rosette_lm, c("loo", "waic"))
+print(summary(rosette_lm), digits = 3)
+loo(rosette_lm)
+plot(loo(rosette_lm))
+save(rosette_lm, file = "large model outputs R1/rosette_lm.Rdata")
+
+# replicate models that include intial diameter
+rosette_gam_init <- brm(Early_growth10 ~ s(cTemp_rosette, k = 8, bs = "tp") + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_gam_init <- add_criterion(rosette_gam_init, c("loo", "waic"))
+print(summary(rosette_gam_init), digits = 3)
+loo(rosette_gam_init)
+plot(loo(rosette_gam_init))
+save(rosette_gam, file = "large model outputs R1/rosette_gam_init.Rdata")
+
+
+rosette_quad_init <- brm(Early_growth10 ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_quad_init <- add_criterion(rosette_quad_init, c("loo", "waic"))
+print(summary(rosette_quad_init), digits = 3)
+loo(rosette_quad_init)
+plot(loo(rosette_quad_init))
+save(rosette_quad_init, file = "large model outputs R1/rosette_quad_init.Rdata")
+
+
+rosette_lm_init <- brm(Early_growth10 ~ cTemp_rosette + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_lm_init <- add_criterion(rosette_lm_init, c("loo", "waic"))
+print(summary(rosette_lm_init), digits = 3)
+loo(rosette_lm_init)
+plot(loo(rosette_lm_init))
+save(rosette_lm_init, file = "large model outputs R1/rosette_lm_init.Rdata")
+
+```
+
+
+``` {r load rosette models part 1 and model selection}
+
+rosette_gam <- get(load("large model outputs R1/rosette_gam.Rdata"))
+rosette_quad <- get(load("large model outputs R1/rosette_quad.Rdata"))
+rosette_lm <- get(load("large model outputs R1/rosette_lm.Rdata"))
+rosette_gam_init <- get(load("large model outputs R1/rosette_gam_init.Rdata"))
+rosette_quad_init <- get(load("large model outputs R1/rosette_quad_init.Rdata"))
+rosette_lm_init <- get(load("large model outputs R1/rosette_lm_init.Rdata"))
+
+# LOO and stacking model selection
+rosette_loo <- loo_compare(rosette_gam, rosette_quad, rosette_lm, 
+                       rosette_gam_init, rosette_quad_init, rosette_lm_init, criterion = "loo")
+rosette_weights <- loo_model_weights(rosette_gam, rosette_quad, rosette_lm,
+                                 rosette_gam_init, rosette_quad_init, rosette_lm_init)
+
+rosette_loo
+rosette_weights
+
+```
+
+
+``` {r run rosette models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+rosette_quad_init_intA_intM <- rosette_quad_init
+save(rosette_quad_init_intA_intM, file = "large model outputs R1/rosette_quad_init_intA_intM.Rdata")
+
+rosette_quad_init_intA_rrM <- brm(Early_growth10 ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_quad_init_intA_rrM <- add_criterion(rosette_quad_init_intA_rrM, c("loo", "waic"))
+print(summary(rosette_quad_init_intA_rrM), digits = 3)
+loo(rosette_quad_init_intA_rrM)
+plot(loo(rosette_quad_init_intA_rrM))
+save(rosette_quad_init_intA_rrM, file = "large model outputs R1/rosette_quad_init_intA_rrM.Rdata")
+
+
+rosette_quad_init_rrA_rrM <- brm(Early_growth10 ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_quad_init_rrA_rrM <- add_criterion(rosette_quad_init_rrA_rrM, c("loo", "waic"))
+print(summary(rosette_quad_init_rrA_rrM), digits = 3)
+loo(rosette_quad_init_rrA_rrM)
+plot(loo(rosette_quad_init_rrA_rrM))
+save(rosette_quad_init_rrA_rrM, file = "large model outputs R1/rosette_quad_init_rrA_rrM.Rdata")
+
+
+rosette_quad_init_rrA_intM <- brm(Early_growth10 ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+rosette_quad_init_rrA_intM <- add_criterion(rosette_quad_init_rrA_intM, c("loo", "waic"))
+print(summary(rosette_quad_init_rrA_intM), digits = 3)
+loo(rosette_quad_init_rrA_intM)
+plot(loo(rosette_quad_init_rrA_intM))
+save(rosette_quad_init_rrA_intM, file = "large model outputs R1/rosette_quad_init_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load rosette models part 2 and model selection}
+
+rosette_quad_init_intA_intM <- get(load("large model outputs R1/rosette_quad_init_intA_intM.Rdata"))
+rosette_quad_init_intA_rrM <- get(load("large model outputs R1/rosette_quad_init_intA_rrM.Rdata"))
+rosette_quad_init_rrA_rrM <- get(load("large model outputs R1/rosette_quad_init_rrA_rrM.Rdata"))
+rosette_quad_init_rrA_intM <- get(load("large model outputs R1/rosette_quad_init_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+rosette_loo2 <- loo_compare(rosette_quad_init_intA_intM, rosette_quad_init_intA_rrM, 
+                          rosette_quad_init_rrA_rrM, rosette_quad_init_rrA_intM, criterion = "loo")
+rosette_weights2 <- loo_model_weights(rosette_quad_init_intA_intM, rosette_quad_init_intA_rrM, 
+                          rosette_quad_init_rrA_rrM, rosette_quad_init_rrA_intM)
+
+rosette_loo2
+rosette_weights2
+
+```
+
+
+```{r final rosette model for interpretation}
+
+print(summary(rosette_quad_init_intA_rrM), round = 2)
+
+```
+
+
+
+```{r run biomass models part 1}
+
+# Part (i) population-level
+biomass_gam <- brm(Above_ground_biomass_g ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_gam <- add_criterion(biomass_gam, c("loo", "waic"))
+print(summary(biomass_gam), digits = 3)
+loo(biomass_gam)
+plot(loo(biomass_gam))
+save(biomass_gam, file = "large model outputs R1/biomass_gam.Rdata")
+
+
+biomass_quad <- brm(Above_ground_biomass_g ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_quad <- add_criterion(biomass_quad, c("loo", "waic"))
+print(summary(biomass_quad), digits = 3)
+loo(biomass_quad)
+plot(loo(biomass_quad))
+save(biomass_quad, file = "large model outputs R1/biomass_quad.Rdata")
+
+
+biomass_lm <- brm(Above_ground_biomass_g ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_lm <- add_criterion(biomass_lm, c("loo", "waic"))
+print(summary(biomass_lm), digits = 3)
+loo(biomass_lm)
+plot(loo(biomass_lm))
+save(biomass_lm, file = "large model outputs R1/biomass_lm.Rdata")
+
+# replicate models that include intial diameter
+biomass_gam_init <- brm(Above_ground_biomass_g ~ s(cTemp_rosette, k = 8, bs = "tp") + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_gam_init <- add_criterion(biomass_gam_init, c("loo", "waic"))
+print(summary(biomass_gam_init), digits = 3)
+loo(biomass_gam_init)
+plot(loo(biomass_gam_init))
+save(biomass_gam, file = "large model outputs R1/biomass_gam_init.Rdata")
+
+
+biomass_quad_init <- brm(Above_ground_biomass_g ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_quad_init <- add_criterion(biomass_quad_init, c("loo", "waic"))
+print(summary(biomass_quad_init), digits = 3)
+loo(biomass_quad_init)
+plot(loo(biomass_quad_init))
+save(biomass_quad_init, file = "large model outputs R1/biomass_quad_init.Rdata")
+
+
+biomass_lm_init <- brm(Above_ground_biomass_g ~ cTemp_rosette + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_lm_init <- add_criterion(biomass_lm_init, c("loo", "waic"))
+print(summary(biomass_lm_init), digits = 3)
+loo(biomass_lm_init)
+plot(loo(biomass_lm_init))
+save(biomass_lm_init, file = "large model outputs R1/biomass_lm_init.Rdata")
+
+```
+
+
+``` {r load biomass models part 1 and model selection}
+
+biomass_gam <- get(load("large model outputs R1/biomass_gam.Rdata"))
+biomass_quad <- get(load("large model outputs R1/biomass_quad.Rdata"))
+biomass_lm <- get(load("large model outputs R1/biomass_lm.Rdata"))
+biomass_gam_init <- get(load("large model outputs R1/biomass_gam_init.Rdata"))
+biomass_quad_init <- get(load("large model outputs R1/biomass_quad_init.Rdata"))
+biomass_lm_init <- get(load("large model outputs R1/biomass_lm_init.Rdata"))
+
+# LOO and stacking model selection
+biomass_loo <- loo_compare(biomass_gam, biomass_quad, biomass_lm, 
+                       biomass_gam_init, biomass_quad_init, biomass_lm_init, criterion = "loo")
+biomass_weights <- loo_model_weights(biomass_gam, biomass_quad, biomass_lm,
+                                 biomass_gam_init, biomass_quad_init, biomass_lm_init)
+
+biomass_loo
+biomass_weights
+
+```
+
+
+``` {r run biomass models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+biomass_quad_intA_intM <- biomass_quad
+save(biomass_quad_intA_intM, file = "large model outputs R1/biomass_quad_intA_intM.Rdata")
+
+biomass_quad_intA_rrM <- brm(Above_ground_biomass_g ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_quad_intA_rrM <- add_criterion(biomass_quad_intA_rrM, c("loo", "waic"))
+print(summary(biomass_quad_intA_rrM), digits = 3)
+loo(biomass_quad_intA_rrM)
+plot(loo(biomass_quad_intA_rrM))
+save(biomass_quad_intA_rrM, file = "large model outputs R1/biomass_quad_intA_rrM.Rdata")
+
+
+biomass_quad_rrA_rrM <- brm(Above_ground_biomass_g ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_quad_rrA_rrM <- add_criterion(biomass_quad_rrA_rrM, c("loo", "waic"))
+print(summary(biomass_quad_rrA_rrM), digits = 3)
+loo(biomass_quad_rrA_rrM)
+plot(loo(biomass_quad_rrA_rrM))
+save(biomass_quad_rrA_rrM, file = "large model outputs R1/biomass_quad_rrA_rrM.Rdata")
+
+
+biomass_quad_rrA_intM <- brm(Above_ground_biomass_g ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+biomass_quad_rrA_intM <- add_criterion(biomass_quad_rrA_intM, c("loo", "waic"))
+print(summary(biomass_quad_rrA_intM), digits = 3)
+loo(biomass_quad_rrA_intM)
+plot(loo(biomass_quad_rrA_intM))
+save(biomass_quad_rrA_intM, file = "large model outputs R1/biomass_quad_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load biomass models part 2 and model selection}
+
+biomass_quad_intA_intM <- get(load("large model outputs R1/biomass_quad_intA_intM.Rdata"))
+biomass_quad_intA_rrM <- get(load("large model outputs R1/biomass_quad_intA_rrM.Rdata"))
+biomass_quad_rrA_rrM <- get(load("large model outputs R1/biomass_quad_rrA_rrM.Rdata"))
+biomass_quad_rrA_intM <- get(load("large model outputs R1/biomass_quad_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+biomass_loo2 <- loo_compare(biomass_quad_intA_intM, biomass_quad_intA_rrM, 
+                          biomass_quad_rrA_rrM, biomass_quad_rrA_intM, criterion = "loo")
+biomass_weights2 <- loo_model_weights(biomass_quad_intA_intM, biomass_quad_intA_rrM, 
+                          biomass_quad_rrA_rrM, biomass_quad_rrA_intM)
+
+biomass_loo2
+biomass_weights2
+
+```
+
+
+```{r final biomass model for interpretation}
+
+print(summary(biomass_quad_intA_intM), round = 2)
+
+```
+
+
+
+```{r run phipsii models part 1}
+
+# Part (i) population-level
+phipsii_gam <- brm(phipsii10 ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_gam <- add_criterion(phipsii_gam, c("loo", "waic"))
+print(summary(phipsii_gam), digits = 3)
+loo(phipsii_gam)
+plot(loo(phipsii_gam))
+save(phipsii_gam, file = "large model outputs R1/phipsii_gam.Rdata")
+
+
+phipsii_quad <- brm(phipsii10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_quad <- add_criterion(phipsii_quad, c("loo", "waic"))
+print(summary(phipsii_quad), digits = 3)
+loo(phipsii_quad)
+plot(loo(phipsii_quad))
+save(phipsii_quad, file = "large model outputs R1/phipsii_quad.Rdata")
+
+
+phipsii_lm <- brm(phipsii10 ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_lm <- add_criterion(phipsii_lm, c("loo", "waic"))
+print(summary(phipsii_lm), digits = 3)
+loo(phipsii_lm)
+plot(loo(phipsii_lm))
+save(phipsii_lm, file = "large model outputs R1/phipsii_lm.Rdata")
+
+
+```
+
+
+``` {r load phipsii models part 1 and model selection}
+
+phipsii_gam <- get(load("large model outputs R1/phipsii_gam.Rdata"))
+phipsii_quad <- get(load("large model outputs R1/phipsii_quad.Rdata"))
+phipsii_lm <- get(load("large model outputs R1/phipsii_lm.Rdata"))
+
+# LOO and stacking model selection
+phipsii_loo <- loo_compare(phipsii_gam, phipsii_quad, phipsii_lm, criterion = "loo")
+phipsii_weights <- loo_model_weights(phipsii_gam, phipsii_quad, phipsii_lm)
+
+phipsii_loo
+phipsii_weights
+
+```
+
+
+``` {r run phipsii models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+phipsii_quad_intA_intM <- phipsii_quad
+save(phipsii_quad_intA_intM, file = "large model outputs R1/phipsii_quad_intA_intM.Rdata")
+
+phipsii_quad_intA_rrM <- brm(phipsii10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_quad_intA_rrM <- add_criterion(phipsii_quad_intA_rrM, c("loo", "waic"))
+print(summary(phipsii_quad_intA_rrM), digits = 3)
+loo(phipsii_quad_intA_rrM)
+plot(loo(phipsii_quad_intA_rrM))
+save(phipsii_quad_intA_rrM, file = "large model outputs R1/phipsii_quad_intA_rrM.Rdata")
+
+
+phipsii_quad_rrA_rrM <- brm(phipsii10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_quad_rrA_rrM <- add_criterion(phipsii_quad_rrA_rrM, c("loo", "waic"))
+print(summary(phipsii_quad_rrA_rrM), digits = 3)
+loo(phipsii_quad_rrA_rrM)
+plot(loo(phipsii_quad_rrA_rrM))
+save(phipsii_quad_rrA_rrM, file = "large model outputs R1/phipsii_quad_rrA_rrM.Rdata")
+
+
+phipsii_quad_rrA_intM <- brm(phipsii10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+phipsii_quad_rrA_intM <- add_criterion(phipsii_quad_rrA_intM, c("loo", "waic"))
+print(summary(phipsii_quad_rrA_intM), digits = 3)
+loo(phipsii_quad_rrA_intM)
+plot(loo(phipsii_quad_rrA_intM))
+save(phipsii_quad_rrA_intM, file = "large model outputs R1/phipsii_quad_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load phipsii models part 2 and model selection}
+
+phipsii_quad_intA_intM <- get(load("large model outputs R1/phipsii_quad_intA_intM.Rdata"))
+phipsii_quad_intA_rrM <- get(load("large model outputs R1/phipsii_quad_intA_rrM.Rdata"))
+phipsii_quad_rrA_rrM <- get(load("large model outputs R1/phipsii_quad_rrA_rrM.Rdata"))
+phipsii_quad_rrA_intM <- get(load("large model outputs R1/phipsii_quad_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+phipsii_loo2 <- loo_compare(phipsii_quad_intA_intM, phipsii_quad_intA_rrM, 
+                          phipsii_quad_rrA_rrM, phipsii_quad_rrA_intM, criterion = "loo")
+phipsii_weights2 <- loo_model_weights(phipsii_quad_intA_intM, phipsii_quad_intA_rrM, 
+                          phipsii_quad_rrA_rrM, phipsii_quad_rrA_intM)
+
+phipsii_loo2
+phipsii_weights2
+
+```
+
+
+```{r final phipsii model for interpretation}
+
+print(summary(phipsii_quad_intA_intM), digits = 2)
+
+```
+
+
+
+```{r run fvfm models part 1}
+
+# Part (i) population-level
+fvfm_gam <- brm(fvfm_hot10 ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_gam <- add_criterion(fvfm_gam, c("loo", "waic"))
+print(summary(fvfm_gam), digits = 3)
+loo(fvfm_gam)
+plot(loo(fvfm_gam))
+save(fvfm_gam, file = "large model outputs R1/fvfm_gam.Rdata")
+
+
+fvfm_quad <- brm(fvfm_hot10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_quad <- add_criterion(fvfm_quad, c("loo", "waic"))
+print(summary(fvfm_quad), digits = 3)
+loo(fvfm_quad)
+plot(loo(fvfm_quad))
+save(fvfm_quad, file = "large model outputs R1/fvfm_quad.Rdata")
+
+
+fvfm_lm <- brm(fvfm_hot10 ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_lm <- add_criterion(fvfm_lm, c("loo", "waic"))
+print(summary(fvfm_lm), digits = 3)
+loo(fvfm_lm)
+plot(loo(fvfm_lm))
+save(fvfm_lm, file = "large model outputs R1/fvfm_lm.Rdata")
+
+
+```
+
+
+``` {r load fvfm models part 1 and model selection}
+
+fvfm_gam <- get(load("large model outputs R1/fvfm_gam.Rdata")) # GAM failed to run
+fvfm_quad <- get(load("large model outputs R1/fvfm_quad.Rdata"))
+fvfm_lm <- get(load("large model outputs R1/fvfm_lm.Rdata"))
+
+# LOO and stacking model selection
+fvfm_loo <- loo_compare(fvfm_quad, fvfm_lm, criterion = "loo")
+fvfm_weights <- loo_model_weights(fvfm_quad, fvfm_lm)
+
+fvfm_loo
+fvfm_weights
+
+```
+
+
+
+``` {r run fvfm models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+fvfm_quad_intA_intM <- fvfm_quad
+save(fvfm_quad_intA_intM, file = "large model outputs R1/fvfm_quad_intA_intM.Rdata")
+
+fvfm_quad_intA_rrM <- brm(fvfm_hot10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_quad_intA_rrM <- add_criterion(fvfm_quad_intA_rrM, c("loo", "waic"))
+print(summary(fvfm_quad_intA_rrM), digits = 3)
+loo(fvfm_quad_intA_rrM)
+plot(loo(fvfm_quad_intA_rrM))
+save(fvfm_quad_intA_rrM, file = "large model outputs R1/fvfm_quad_intA_rrM.Rdata")
+
+
+fvfm_quad_rrA_rrM <- brm(fvfm_hot10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_quad_rrA_rrM <- add_criterion(fvfm_quad_rrA_rrM, c("loo", "waic"))
+print(summary(fvfm_quad_rrA_rrM), digits = 3)
+loo(fvfm_quad_rrA_rrM)
+plot(loo(fvfm_quad_rrA_rrM))
+save(fvfm_quad_rrA_rrM, file = "large model outputs R1/fvfm_quad_rrA_rrM.Rdata")
+
+
+fvfm_quad_rrA_intM <- brm(fvfm_hot10 ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+fvfm_quad_rrA_intM <- add_criterion(fvfm_quad_rrA_intM, c("loo", "waic"))
+print(summary(fvfm_quad_rrA_intM), digits = 3)
+loo(fvfm_quad_rrA_intM)
+plot(loo(fvfm_quad_rrA_intM))
+save(fvfm_quad_rrA_intM, file = "large model outputs R1/fvfm_quad_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load fvfm models part 2 and model selection}
+
+fvfm_quad_intA_intM <- get(load("large model outputs R1/fvfm_quad_intA_intM.Rdata"))
+fvfm_quad_intA_rrM <- get(load("large model outputs R1/fvfm_quad_intA_rrM.Rdata"))
+fvfm_quad_rrA_rrM <- get(load("large model outputs R1/fvfm_quad_rrA_rrM.Rdata"))
+fvfm_quad_rrA_intM <- get(load("large model outputs R1/fvfm_quad_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+fvfm_loo2 <- loo_compare(fvfm_quad_intA_intM, fvfm_quad_intA_rrM, 
+                          fvfm_quad_rrA_rrM, fvfm_quad_rrA_intM, criterion = "loo")
+fvfm_weights2 <- loo_model_weights(fvfm_quad_intA_intM, fvfm_quad_intA_rrM, 
+                          fvfm_quad_rrA_rrM, fvfm_quad_rrA_intM)
+
+fvfm_loo2
+fvfm_weights2
+
+```
+
+
+```{r final fvfm model for interpretation}
+
+print(summary(fvfm_quad_rrA_intM), digits = 4)
+
+```
+
+
+
+```{r run ctmax models part 1}
+
+# Part (i) population-level
+ctmax_gam <- brm(Tcrit.break_hot ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_gam <- add_criterion(ctmax_gam, c("loo", "waic"))
+print(summary(ctmax_gam), digits = 3)
+loo(ctmax_gam)
+plot(loo(ctmax_gam))
+save(ctmax_gam, file = "large model outputs R1/ctmax_gam.Rdata")
+
+
+ctmax_quad <- brm(Tcrit.break_hot ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_quad <- add_criterion(ctmax_quad, c("loo", "waic"))
+print(summary(ctmax_quad), digits = 3)
+loo(ctmax_quad)
+plot(loo(ctmax_quad))
+save(ctmax_quad, file = "large model outputs R1/ctmax_quad.Rdata")
+
+
+ctmax_lm <- brm(Tcrit.break_hot ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_lm <- add_criterion(ctmax_lm, c("loo", "waic"))
+print(summary(ctmax_lm), digits = 3)
+loo(ctmax_lm)
+plot(loo(ctmax_lm))
+save(ctmax_lm, file = "large model outputs R1/ctmax_lm.Rdata")
+
+
+```
+
+
+``` {r load ctmax models part 1 and model selection}
+
+ctmax_gam <- get(load("large model outputs R1/ctmax_gam.Rdata"))
+ctmax_quad <- get(load("large model outputs R1/ctmax_quad.Rdata"))
+ctmax_lm <- get(load("large model outputs R1/ctmax_lm.Rdata"))
+
+# LOO and stacking model selection
+ctmax_loo <- loo_compare(ctmax_gam, ctmax_quad, ctmax_lm, criterion = "loo")
+ctmax_weights <- loo_model_weights(ctmax_gam, ctmax_quad, ctmax_lm)
+
+ctmax_loo
+ctmax_weights
+
+```
+
+
+
+``` {r run ctmax models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+ctmax_quad_intA_intM <- ctmax_quad
+save(ctmax_quad_intA_intM, file = "large model outputs R1/ctmax_quad_intA_intM.Rdata")
+
+ctmax_quad_intA_rrM <- brm(Tcrit.break_hot ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_quad_intA_rrM <- add_criterion(ctmax_quad_intA_rrM, c("loo", "waic"))
+print(summary(ctmax_quad_intA_rrM), digits = 3)
+loo(ctmax_quad_intA_rrM)
+plot(loo(ctmax_quad_intA_rrM))
+save(ctmax_quad_intA_rrM, file = "large model outputs R1/ctmax_quad_intA_rrM.Rdata")
+
+
+ctmax_quad_rrA_rrM <- brm(Tcrit.break_hot ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_quad_rrA_rrM <- add_criterion(ctmax_quad_rrA_rrM, c("loo", "waic"))
+print(summary(ctmax_quad_rrA_rrM), digits = 3)
+loo(ctmax_quad_rrA_rrM)
+plot(loo(ctmax_quad_rrA_rrM))
+save(ctmax_quad_rrA_rrM, file = "large model outputs R1/ctmax_quad_rrA_rrM.Rdata")
+
+
+ctmax_quad_rrA_intM <- brm(Tcrit.break_hot ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmax_quad_rrA_intM <- add_criterion(ctmax_quad_rrA_intM, c("loo", "waic"))
+print(summary(ctmax_quad_rrA_intM), digits = 3)
+loo(ctmax_quad_rrA_intM)
+plot(loo(ctmax_quad_rrA_intM))
+save(ctmax_quad_rrA_intM, file = "large model outputs R1/ctmax_quad_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load ctmax models part 2 and model selection}
+
+ctmax_quad_intA_intM <- get(load("large model outputs R1/ctmax_quad_intA_intM.Rdata"))
+ctmax_quad_intA_rrM <- get(load("large model outputs R1/ctmax_quad_intA_rrM.Rdata"))
+ctmax_quad_rrA_rrM <- get(load("large model outputs R1/ctmax_quad_rrA_rrM.Rdata"))
+ctmax_quad_rrA_intM <- get(load("large model outputs R1/ctmax_quad_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+ctmax_loo2 <- loo_compare(ctmax_quad_intA_intM, ctmax_quad_intA_rrM, 
+                          ctmax_quad_rrA_rrM, ctmax_quad_rrA_intM, criterion = "loo")
+ctmax_weights2 <- loo_model_weights(ctmax_quad_intA_intM, ctmax_quad_intA_rrM, 
+                          ctmax_quad_rrA_rrM, ctmax_quad_rrA_intM)
+
+ctmax_loo2
+ctmax_weights2
+
+```
+
+
+```{r final ctmax model for interpretation}
+
+print(summary(ctmax_quad_rrA_rrM), digits = 2)
+
+```
+
+
+```{r run tmax models part 1}
+
+# Part (i) population-level
+tmax_gam <- brm(Tmax_hot ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_gam <- add_criterion(tmax_gam, c("loo", "waic"))
+print(summary(tmax_gam), digits = 3)
+loo(tmax_gam)
+plot(loo(tmax_gam))
+save(tmax_gam, file = "large model outputs R1/tmax_gam.Rdata")
+
+
+tmax_quad <- brm(Tmax_hot ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_quad <- add_criterion(tmax_quad, c("loo", "waic"))
+print(summary(tmax_quad), digits = 3)
+loo(tmax_quad)
+plot(loo(tmax_quad))
+save(tmax_quad, file = "large model outputs R1/tmax_quad.Rdata")
+
+
+tmax_lm <- brm(Tmax_hot ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_lm <- add_criterion(tmax_lm, c("loo", "waic"))
+print(summary(tmax_lm), digits = 3)
+loo(tmax_lm)
+plot(loo(tmax_lm))
+save(tmax_lm, file = "large model outputs R1/tmax_lm.Rdata")
+
+
+```
+
+
+``` {r load tmax models part 1 and model selection}
+
+tmax_gam <- get(load("large model outputs R1/tmax_gam.Rdata"))
+tmax_quad <- get(load("large model outputs R1/tmax_quad.Rdata"))
+tmax_lm <- get(load("large model outputs R1/tmax_lm.Rdata"))
+
+# LOO and stacking model selection
+tmax_loo <- loo_compare(tmax_gam, tmax_quad, tmax_lm, criterion = "loo")
+tmax_weights <- loo_model_weights(tmax_gam, tmax_quad, tmax_lm)
+
+tmax_loo
+tmax_weights
+
+```
+
+
+
+``` {r run tmax models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+tmax_lm_intA_intM <- tmax_lm
+save(tmax_lm_intA_intM, file = "large model outputs R1/tmax_lm_intA_intM.Rdata")
+
+tmax_lm_intA_rrM <- brm(Tmax_hot ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_lm_intA_rrM <- add_criterion(tmax_lm_intA_rrM, c("loo", "waic"))
+print(summary(tmax_lm_intA_rrM), digits = 3)
+loo(tmax_lm_intA_rrM)
+plot(loo(tmax_lm_intA_rrM))
+save(tmax_lm_intA_rrM, file = "large model outputs R1/tmax_lm_intA_rrM.Rdata")
+
+
+tmax_lm_rrA_rrM <- brm(Tmax_hot ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_lm_rrA_rrM <- add_criterion(tmax_lm_rrA_rrM, c("loo", "waic"))
+print(summary(tmax_lm_rrA_rrM), digits = 3)
+loo(tmax_lm_rrA_rrM)
+plot(loo(tmax_lm_rrA_rrM))
+save(tmax_lm_rrA_rrM, file = "large model outputs R1/tmax_lm_rrA_rrM.Rdata")
+
+
+tmax_lm_rrA_intM <- brm(Tmax_hot ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+tmax_lm_rrA_intM <- add_criterion(tmax_lm_rrA_intM, c("loo", "waic"))
+print(summary(tmax_lm_rrA_intM), digits = 3)
+loo(tmax_lm_rrA_intM)
+plot(loo(tmax_lm_rrA_intM))
+save(tmax_lm_rrA_intM, file = "large model outputs R1/tmax_lm_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load tmax models part 2 and model selection}
+
+tmax_lm_intA_intM <- get(load("large model outputs R1/tmax_lm_intA_intM.Rdata"))
+tmax_lm_intA_rrM <- get(load("large model outputs R1/tmax_lm_intA_rrM.Rdata"))
+tmax_lm_rrA_rrM <- get(load("large model outputs R1/tmax_lm_rrA_rrM.Rdata"))
+tmax_lm_rrA_intM <- get(load("large model outputs R1/tmax_lm_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+tmax_loo2 <- loo_compare(tmax_lm_intA_intM, tmax_lm_intA_rrM, 
+                          tmax_lm_rrA_rrM, tmax_lm_rrA_intM, criterion = "loo")
+tmax_weights2 <- loo_model_weights(tmax_lm_intA_intM, tmax_lm_intA_rrM, 
+                          tmax_lm_rrA_rrM, tmax_lm_rrA_intM)
+
+tmax_loo2
+tmax_weights2
+
+```
+
+
+```{r final tmax model for interpretation}
+
+print(summary(tmax_lm_intA_intM), digits = 2)
+
+```
+
+
+
+```{r run ctmin models part 1}
+
+# Part (i) population-level
+ctmin_gam <- brm(Tcrit.break_cold ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_gam <- add_criterion(ctmin_gam, c("loo", "waic"))
+print(summary(ctmin_gam), digits = 3)
+loo(ctmin_gam)
+plot(loo(ctmin_gam))
+save(ctmin_gam, file = "large model outputs R1/ctmin_gam.Rdata")
+
+
+ctmin_quad <- brm(Tcrit.break_cold ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_quad <- add_criterion(ctmin_quad, c("loo", "waic"))
+print(summary(ctmin_quad), digits = 3)
+loo(ctmin_quad)
+plot(loo(ctmin_quad))
+save(ctmin_quad, file = "large model outputs R1/ctmin_quad.Rdata")
+
+
+ctmin_lm <- brm(Tcrit.break_cold ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_lm <- add_criterion(ctmin_lm, c("loo", "waic"))
+print(summary(ctmin_lm), digits = 3)
+loo(ctmin_lm)
+plot(loo(ctmin_lm))
+save(ctmin_lm, file = "large model outputs R1/ctmin_lm.Rdata")
+
+
+```
+
+
+``` {r load ctmin models part 1 and model selection}
+
+ctmin_gam <- get(load("large model outputs R1/ctmin_gam.Rdata"))
+ctmin_quad <- get(load("large model outputs R1/ctmin_quad.Rdata"))
+ctmin_lm <- get(load("large model outputs R1/ctmin_lm.Rdata"))
+
+# LOO and stacking model selection
+ctmin_loo <- loo_compare(ctmin_gam, ctmin_quad, ctmin_lm, criterion = "loo")
+ctmin_weights <- loo_model_weights(ctmin_gam, ctmin_quad, ctmin_lm)
+
+ctmin_loo
+ctmin_weights
+
+```
+
+
+
+``` {r run ctmin models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+ctmin_lm_intA_intM <- ctmin_lm
+save(ctmin_lm_intA_intM, file = "large model outputs R1/ctmin_lm_intA_intM.Rdata")
+
+ctmin_lm_intA_rrM <- brm(Tcrit.break_cold ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_lm_intA_rrM <- add_criterion(ctmin_lm_intA_rrM, c("loo", "waic"))
+print(summary(ctmin_lm_intA_rrM), digits = 3)
+loo(ctmin_lm_intA_rrM)
+plot(loo(ctmin_lm_intA_rrM))
+save(ctmin_lm_intA_rrM, file = "large model outputs R1/ctmin_lm_intA_rrM.Rdata")
+
+
+ctmin_lm_rrA_rrM <- brm(Tcrit.break_cold ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_lm_rrA_rrM <- add_criterion(ctmin_lm_rrA_rrM, c("loo", "waic"))
+print(summary(ctmin_lm_rrA_rrM), digits = 3)
+loo(ctmin_lm_rrA_rrM)
+plot(loo(ctmin_lm_rrA_rrM))
+save(ctmin_lm_rrA_rrM, file = "large model outputs R1/ctmin_lm_rrA_rrM.Rdata")
+
+
+ctmin_lm_rrA_intM <- brm(Tcrit.break_cold ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+ctmin_lm_rrA_intM <- add_criterion(ctmin_lm_rrA_intM, c("loo", "waic"))
+print(summary(ctmin_lm_rrA_intM), digits = 3)
+loo(ctmin_lm_rrA_intM)
+plot(loo(ctmin_lm_rrA_intM))
+save(ctmin_lm_rrA_intM, file = "large model outputs R1/ctmin_lm_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load ctmin models part 2 and model selection}
+
+ctmin_lm_intA_intM <- get(load("large model outputs R1/ctmin_lm_intA_intM.Rdata"))
+ctmin_lm_intA_rrM <- get(load("large model outputs R1/ctmin_lm_intA_rrM.Rdata"))
+ctmin_lm_rrA_rrM <- get(load("large model outputs R1/ctmin_lm_rrA_rrM.Rdata"))
+ctmin_lm_rrA_intM <- get(load("large model outputs R1/ctmin_lm_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+ctmin_loo2 <- loo_compare(ctmin_lm_intA_intM, ctmin_lm_intA_rrM, 
+                          ctmin_lm_rrA_rrM, ctmin_lm_rrA_intM, criterion = "loo")
+ctmin_weights2 <- loo_model_weights(ctmin_lm_intA_intM, ctmin_lm_intA_rrM, 
+                          ctmin_lm_rrA_rrM, ctmin_lm_rrA_intM)
+
+ctmin_loo2
+ctmin_weights2
+
+```
+
+
+```{r final ctmin model for interpretation}
+
+print(summary(ctmin_lm_intA_intM), digits = 2)
+
+```
+
+
+
+```{r run nt models part 1}
+
+# Part (i) population-level
+nt_gam <- brm(Nuc_temp ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_gam <- add_criterion(nt_gam, c("loo", "waic"))
+print(summary(nt_gam), digits = 3)
+loo(nt_gam)
+plot(loo(nt_gam))
+save(nt_gam, file = "large model outputs R1/nt_gam.Rdata")
+
+
+nt_quad <- brm(Nuc_temp ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_quad <- add_criterion(nt_quad, c("loo", "waic"))
+print(summary(nt_quad), digits = 3)
+loo(nt_quad)
+plot(loo(nt_quad))
+save(nt_quad, file = "large model outputs R1/nt_quad.Rdata")
+
+
+nt_lm <- brm(Nuc_temp ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_lm <- add_criterion(nt_lm, c("loo", "waic"))
+print(summary(nt_lm), digits = 3)
+loo(nt_lm)
+plot(loo(nt_lm))
+save(nt_lm, file = "large model outputs R1/nt_lm.Rdata")
+
+
+```
+
+
+``` {r load nt models part 1 and model selection}
+
+nt_gam <- get(load("large model outputs R1/nt_gam.Rdata"))
+nt_quad <- get(load("large model outputs R1/nt_quad.Rdata"))
+nt_lm <- get(load("large model outputs R1/nt_lm.Rdata"))
+
+# LOO and stacking model selection
+nt_loo <- loo_compare(nt_gam, nt_quad, nt_lm, criterion = "loo")
+nt_weights <- loo_model_weights(nt_gam, nt_quad, nt_lm)
+
+nt_loo
+nt_weights
+
+```
+
+
+
+``` {r run nt models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+nt_lm_intA_intM <- nt_lm
+save(nt_lm_intA_intM, file = "large model outputs R1/nt_lm_intA_intM.Rdata")
+
+nt_lm_intA_rrM <- brm(Nuc_temp ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_lm_intA_rrM <- add_criterion(nt_lm_intA_rrM, c("loo", "waic"))
+print(summary(nt_lm_intA_rrM), digits = 3)
+loo(nt_lm_intA_rrM)
+plot(loo(nt_lm_intA_rrM))
+save(nt_lm_intA_rrM, file = "large model outputs R1/nt_lm_intA_rrM.Rdata")
+
+
+nt_lm_rrA_rrM <- brm(Nuc_temp ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_lm_rrA_rrM <- add_criterion(nt_lm_rrA_rrM, c("loo", "waic"))
+print(summary(nt_lm_rrA_rrM), digits = 3)
+loo(nt_lm_rrA_rrM)
+plot(loo(nt_lm_rrA_rrM))
+save(nt_lm_rrA_rrM, file = "large model outputs R1/nt_lm_rrA_rrM.Rdata")
+
+
+nt_lm_rrA_intM <- brm(Nuc_temp ~ cTemp_rosette +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+nt_lm_rrA_intM <- add_criterion(nt_lm_rrA_intM, c("loo", "waic"))
+print(summary(nt_lm_rrA_intM), digits = 3)
+loo(nt_lm_rrA_intM)
+plot(loo(nt_lm_rrA_intM))
+save(nt_lm_rrA_intM, file = "large model outputs R1/nt_lm_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load nt models part 2 and model selection}
+
+nt_lm_intA_intM <- get(load("large model outputs R1/nt_lm_intA_intM.Rdata"))
+nt_lm_intA_rrM <- get(load("large model outputs R1/nt_lm_intA_rrM.Rdata"))
+nt_lm_rrA_rrM <- get(load("large model outputs R1/nt_lm_rrA_rrM.Rdata"))
+nt_lm_rrA_intM <- get(load("large model outputs R1/nt_lm_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+nt_loo2 <- loo_compare(nt_lm_intA_intM, nt_lm_intA_rrM, 
+                          nt_lm_rrA_rrM, nt_lm_rrA_intM, criterion = "loo")
+nt_weights2 <- loo_model_weights(nt_lm_intA_intM, nt_lm_intA_rrM, 
+                          nt_lm_rrA_rrM, nt_lm_rrA_intM)
+
+nt_loo2
+nt_weights2
+
+```
+
+
+```{r final nt model for interpretation}
+
+print(summary(nt_lm_intA_intM), digits = 2)
+
+```
+
+
+
+```{r run flowering onset models part 1}
+
+# Part (i) population-level
+dff_gam <- brm(Days_first_flower_t ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_gam <- add_criterion(dff_gam, c("loo", "waic"))
+print(summary(dff_gam), digits = 3)
+loo(dff_gam)
+plot(loo(dff_gam))
+save(dff_gam, file = "large model outputs R1/dff_gam.Rdata")
+
+
+dff_quad <- brm(Days_first_flower_t ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_quad <- add_criterion(dff_quad, c("loo", "waic"))
+print(summary(dff_quad), digits = 3)
+loo(dff_quad)
+plot(loo(dff_quad))
+save(dff_quad, file = "large model outputs R1/dff_quad.Rdata")
+
+
+dff_lm <- brm(Days_first_flower_t ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_lm <- add_criterion(dff_lm, c("loo", "waic"))
+print(summary(dff_lm), digits = 3)
+loo(dff_lm)
+plot(loo(dff_lm))
+save(dff_lm, file = "large model outputs R1/dff_lm.Rdata")
+
+
+# replicate models that include intial diameter
+dff_gam_init <- brm(Days_first_flower_t ~ s(cTemp_rosette, k = 8, bs = "tp") + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_gam_init <- add_criterion(dff_gam_init, c("loo", "waic"))
+print(summary(dff_gam_init), digits = 3)
+loo(dff_gam_init)
+plot(loo(dff_gam_init))
+save(dff_gam, file = "large model outputs R1/dff_gam_init.Rdata")
+
+
+dff_quad_init <- brm(Days_first_flower_t ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_quad_init <- add_criterion(dff_quad_init, c("loo", "waic"))
+print(summary(dff_quad_init), digits = 3)
+loo(dff_quad_init)
+plot(loo(dff_quad_init))
+save(dff_quad_init, file = "large model outputs R1/dff_quad_init.Rdata")
+
+
+dff_lm_init <- brm(Days_first_flower_t ~ cTemp_rosette + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_lm_init <- add_criterion(dff_lm_init, c("loo", "waic"))
+print(summary(dff_lm_init), digits = 3)
+loo(dff_lm_init)
+plot(loo(dff_lm_init))
+save(dff_lm_init, file = "large model outputs R1/dff_lm_init.Rdata")
+
+```
+
+
+``` {r load flowering onset models part 1 and model selection}
+
+dff_gam <- get(load("large model outputs R1/dff_gam.Rdata"))
+dff_quad <- get(load("large model outputs R1/dff_quad.Rdata"))
+dff_lm <- get(load("large model outputs R1/dff_lm.Rdata"))
+dff_gam_init <- get(load("large model outputs R1/dff_gam_init.Rdata"))
+dff_quad_init <- get(load("large model outputs R1/dff_quad_init.Rdata"))
+dff_lm_init <- get(load("large model outputs R1/dff_lm_init.Rdata"))
+
+# LOO and stacking model selection
+dff_loo <- loo_compare(dff_gam, dff_quad, dff_lm, 
+                       dff_gam_init, dff_quad_init, dff_lm_init, criterion = "loo")
+dff_weights <- loo_model_weights(dff_gam, dff_quad, dff_lm,
+                                 dff_gam_init, dff_quad_init, dff_lm_init)
+
+dff_loo
+dff_weights
+
+```
+
+
+
+``` {r run flowering onset models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+dff_quad_init_intA_intM <- dff_quad_init
+save(dff_quad_init_intA_intM, file = "large model outputs R1/dff_quad_init_intA_intM.Rdata")
+
+dff_quad_init_intA_rrM <- brm(Days_first_flower_t ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_quad_init_intA_rrM <- add_criterion(dff_quad_init_intA_rrM, c("loo", "waic"))
+print(summary(dff_quad_init_intA_rrM), digits = 3)
+loo(dff_quad_init_intA_rrM)
+plot(loo(dff_quad_init_intA_rrM))
+save(dff_quad_init_intA_rrM, file = "large model outputs R1/dff_quad_init_intA_rrM.Rdata")
+
+
+dff_quad_init_rrA_rrM <- brm(Days_first_flower_t ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_quad_init_rrA_rrM <- add_criterion(dff_quad_init_rrA_rrM, c("loo", "waic"))
+print(summary(dff_quad_init_rrA_rrM), digits = 3)
+loo(dff_quad_init_rrA_rrM)
+plot(loo(dff_quad_init_rrA_rrM))
+save(dff_quad_init_rrA_rrM, file = "large model outputs R1/dff_quad_init_rrA_rrM.Rdata")
+
+
+dff_quad_init_rrA_intM <- brm(Days_first_flower_t ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+dff_quad_init_rrA_intM <- add_criterion(dff_quad_init_rrA_intM, c("loo", "waic"))
+print(summary(dff_quad_init_rrA_intM), digits = 3)
+loo(dff_quad_init_rrA_intM)
+plot(loo(dff_quad_init_rrA_intM))
+save(dff_quad_init_rrA_intM, file = "large model outputs R1/dff_quad_init_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load flowering onset models part 2 and model selection}
+
+dff_quad_init_intA_intM <- get(load("large model outputs R1/dff_quad_init_intA_intM.Rdata"))
+dff_quad_init_intA_rrM <- get(load("large model outputs R1/dff_quad_init_intA_rrM.Rdata"))
+dff_quad_init_rrA_rrM <- get(load("large model outputs R1/dff_quad_init_rrA_rrM.Rdata"))
+dff_quad_init_rrA_intM <- get(load("large model outputs R1/dff_quad_init_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+dff_loo2 <- loo_compare(dff_quad_init_intA_intM, dff_quad_init_intA_rrM, 
+                          dff_quad_init_rrA_rrM, dff_quad_init_rrA_intM, criterion = "loo")
+dff_weights2 <- loo_model_weights(dff_quad_init_intA_intM, dff_quad_init_intA_rrM, 
+                          dff_quad_init_rrA_rrM, dff_quad_init_rrA_intM)
+
+dff_loo2
+dff_weights2
+
+```
+
+
+```{r final flowering onset model for interpretation}
+
+print(summary(dff_quad_init_intA_intM), digits = 2)
+
+```
+
+
+
+```{r run reproductive stems models part 1}
+
+# Part (i) population-level
+repro_gam <- brm(N_flowers_caps ~ s(cTemp_rosette, k = 8, bs = "tp") + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_gam <- add_criterion(repro_gam, c("loo", "waic"))
+print(summary(repro_gam), digits = 3)
+loo(repro_gam)
+plot(loo(repro_gam))
+save(repro_gam, file = "large model outputs R1/repro_gam.Rdata")
+
+
+repro_quad <- brm(N_flowers_caps ~ cTemp_rosette + cTemp_rosette2 +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_quad <- add_criterion(repro_quad, c("loo", "waic"))
+print(summary(repro_quad), digits = 3)
+loo(repro_quad)
+plot(loo(repro_quad))
+save(repro_quad, file = "large model outputs R1/repro_quad.Rdata")
+
+
+repro_lm <- brm(N_flowers_caps ~ cTemp_rosette + 
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_lm <- add_criterion(repro_lm, c("loo", "waic"))
+print(summary(repro_lm), digits = 3)
+loo(repro_lm)
+plot(loo(repro_lm))
+save(repro_lm, file = "large model outputs R1/repro_lm.Rdata")
+
+
+# replicate models that include intial diameter
+repro_gam_init <- brm(N_flowers_caps ~ s(cTemp_rosette, k = 8, bs = "tp") + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_gam_init <- add_criterion(repro_gam_init, c("loo", "waic"))
+print(summary(repro_gam_init), digits = 3)
+loo(repro_gam_init)
+plot(loo(repro_gam_init))
+save(repro_gam, file = "large model outputs R1/repro_gam_init.Rdata")
+
+
+repro_quad_init <- brm(N_flowers_caps ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_quad_init <- add_criterion(repro_quad_init, c("loo", "waic"))
+print(summary(repro_quad_init), digits = 3)
+loo(repro_quad_init)
+plot(loo(repro_quad_init))
+save(repro_quad_init, file = "large model outputs R1/repro_quad_init.Rdata")
+
+
+repro_lm_init <- brm(N_flowers_caps ~ cTemp_rosette + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_lm_init <- add_criterion(repro_lm_init, c("loo", "waic"))
+print(summary(repro_lm_init), digits = 3)
+loo(repro_lm_init)
+plot(loo(repro_lm_init))
+save(repro_lm_init, file = "large model outputs R1/repro_lm_init.Rdata")
+
+```
+
+
+``` {r load reproductive stems models part 1 and model selection}
+
+repro_gam <- get(load("large model outputs R1/repro_gam.Rdata"))
+repro_quad <- get(load("large model outputs R1/repro_quad.Rdata"))
+repro_lm <- get(load("large model outputs R1/repro_lm.Rdata"))
+repro_gam_init <- get(load("large model outputs R1/repro_gam_init.Rdata"))
+repro_quad_init <- get(load("large model outputs R1/repro_quad_init.Rdata"))
+repro_lm_init <- get(load("large model outputs R1/repro_lm_init.Rdata"))
+
+# LOO and stacking model selection
+repro_loo <- loo_compare(repro_gam, repro_quad, repro_lm, 
+                       repro_gam_init, repro_quad_init, repro_lm_init, criterion = "loo")
+repro_weights <- loo_model_weights(repro_gam, repro_quad, repro_lm,
+                                 repro_gam_init, repro_quad_init, repro_lm_init)
+
+repro_loo
+repro_weights
+
+```
+
+
+
+``` {r run reproductive stems models part 2}
+
+# Part (ii) family-level variation in reaction norms
+
+repro_quad_init_intA_intM <- repro_quad_init
+save(repro_quad_init_intA_intM, file = "large model outputs R1/repro_quad_init_intA_intM.Rdata")
+
+repro_quad_init_intA_rrM <- brm(N_flowers_caps ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_quad_init_intA_rrM <- add_criterion(repro_quad_init_intA_rrM, c("loo", "waic"))
+print(summary(repro_quad_init_intA_rrM), digits = 3)
+loo(repro_quad_init_intA_rrM)
+plot(loo(repro_quad_init_intA_rrM))
+save(repro_quad_init_intA_rrM, file = "large model outputs R1/repro_quad_init_intA_rrM.Rdata")
+
+
+repro_quad_init_rrA_rrM <- brm(N_flowers_caps ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1+cTemp_rosette|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_quad_init_rrA_rrM <- add_criterion(repro_quad_init_rrA_rrM, c("loo", "waic"))
+print(summary(repro_quad_init_rrA_rrM), digits = 3)
+loo(repro_quad_init_rrA_rrM)
+plot(loo(repro_quad_init_rrA_rrM))
+save(repro_quad_init_rrA_rrM, file = "large model outputs R1/repro_quad_init_rrA_rrM.Rdata")
+
+
+repro_quad_init_rrA_intM <- brm(N_flowers_caps ~ cTemp_rosette + cTemp_rosette2 + Initial_diameter_mm +
+                     (1|Block) + (1|RowID) + (1|ColumnID) + (1|Mother) + 
+                       (1+cTemp_rosette|gr(animal, cov = A)),
+                 data = F2data, data2 = list(A = A),
+                 family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                 control = list(adapt_delta = 0.99, max_treedepth = 15), seed = 21)
+repro_quad_init_rrA_intM <- add_criterion(repro_quad_init_rrA_intM, c("loo", "waic"))
+print(summary(repro_quad_init_rrA_intM), digits = 3)
+loo(repro_quad_init_rrA_intM)
+plot(loo(repro_quad_init_rrA_intM))
+save(repro_quad_init_rrA_intM, file = "large model outputs R1/repro_quad_init_rrA_intM.Rdata")
+
+
+```
+
+
+```{r load reproductive stems models part 2 and model selection}
+
+repro_quad_init_intA_intM <- get(load("large model outputs R1/repro_quad_init_intA_intM.Rdata"))
+repro_quad_init_intA_rrM <- get(load("large model outputs R1/repro_quad_init_intA_rrM.Rdata"))
+repro_quad_init_rrA_rrM <- get(load("large model outputs R1/repro_quad_init_rrA_rrM.Rdata"))
+repro_quad_init_rrA_intM <- get(load("large model outputs R1/repro_quad_init_rrA_intM.Rdata"))
+
+# LOO and stacking model selection
+repro_loo2 <- loo_compare(repro_quad_init_intA_intM, repro_quad_init_intA_rrM, 
+                          repro_quad_init_rrA_rrM, repro_quad_init_rrA_intM, criterion = "loo")
+repro_weights2 <- loo_model_weights(repro_quad_init_intA_intM, repro_quad_init_intA_rrM, 
+                          repro_quad_init_rrA_rrM, repro_quad_init_rrA_intM)
+
+repro_loo2
+repro_weights2
+
+```
+
+
+```{r final reproductive stems model for interpretation}
+
+print(summary(repro_quad_init_intA_intM), digits = 2)
+
+```
+
+
+
+```{r load in final models}
+
+germ_gam_rrA_intM <- get(load(file = "large model outputs R1/germ_gam_rrA_intM.Rdata"))
+mgt_gam_intA_rrM <- get(load(file = "large model outputs R1/mgt_gam_intA_rrM.Rdata"))
+chlcon_quad_intA_intM <- get(load(file = "large model outputs R1/chlcon_quad_intA_intM.Rdata"))
+lma_quad_init_intA_intM <- get(load(file = "large model outputs R1/lma_quad_init_intA_intM.Rdata"))
+rosette_quad_init_intA_rrM <- get(load(file = "large model outputs R1/rosette_quad_init_intA_rrM.Rdata"))
+biomass_quad_intA_intM <- get(load(file = "large model outputs R1/biomass_quad_intA_intM.Rdata"))
+phipsii_quad_intA_intM <- get(load(file = "large model outputs R1/phipsii_quad_intA_intM.Rdata"))
+fvfm_quad_rrA_intM <- get(load(file = "large model outputs R1/fvfm_quad_rrA_intM.Rdata"))
+ctmax_quad_rrA_rrM <- get(load(file = "large model outputs R1/ctmax_quad_rrA_rrM.Rdata"))
+tmax_lm_intA_intM <- get(load(file = "large model outputs R1/tmax_lm_intA_intM.Rdata"))
+ctmin_lm_intA_intM <- get(load(file = "large model outputs R1/ctmin_lm_intA_intM.Rdata"))
+nt_lm_intA_intM <- get(load(file = "large model outputs R1/nt_lm_intA_intM.Rdata"))
+dff_quad_init_intA_intM <- get(load(file = "large model outputs R1/dff_quad_init_intA_intM.Rdata"))
+repro_quad_init_intA_intM <- get(load(file = "large model outputs R1/repro_quad_init_intA_intM.Rdata"))
+
+
+```
+
+
+
+``` {r compiling figure 1}
+
+# Germination: best model = germ_gam_rrA_intM
+predicted_data <- data.frame(Germ = F2germ$Germ,
+                             Temp = F2germ$Temp,
+                             Temp = I(F2germ$Temp^2),
+                             Line = F2germ$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_germ <- predict(germ_gam_rrA_intM, re.form = NA)[,1]
+predicted_data$pred_line_germ <- predict(germ_gam_rrA_intM, re.form = ~(1+cTemp|animal) + (1|Mother))[,1]
+
+germ_fig1c <-
+ggplot(F2germ, aes(x = Temp, y = Germ)) +
+  stat_smooth(data = predicted_data, aes(x = Temp, y = pred_line_germ, group = Line, colour = Line), lty = 2,
+              geom = "line", alpha = 0.5, method = "gam", formula = y ~ s(x, bs = "tp"), se = FALSE, 
+              size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp, y = Germ, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp, y = pred_pop_germ), 
+              method = "gam", formula = y ~ s(x, bs = "tp"), colour = "black", fullrange = TRUE) +
+  #stat_summary(fun.data = "mean_se", size = 0.7, orientation = x) +
+  stat_summary_bin(fun.data = "mean_se", size = 0.7, binwidth = 1.6, orientation = "x") +
+  ylab(bquote(Germination~count~(italic(n)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(8, 35, 4), limits = c(8.5, 35)) +
+  theme(axis.ticks.length = unit(-0.15,"cm")) # + 
+  #guides(colour = guide_legend(nrow = 4))
+
+
+# MGT: best model = mgt_gam_intA_rrM
+predicted_data <- data.frame(MGT = F2germ$MGT,
+                             Temp = F2germ$Temp,
+                             Temp = I(F2germ$Temp^2),
+                             Line = F2germ$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_mgt <- predict(mgt_gam_intA_rrM, re.form = NA)[,1]
+predicted_data$pred_line_mgt <- predict(mgt_gam_intA_rrM, re.form = ~(1|animal) + (1+cTemp|Mother))[,1]
+
+mgt_fig1d <-
+ggplot(F2germ, aes(x = Temp, y = MGT)) +
+  stat_smooth(data = predicted_data, aes(x = Temp, y = exp(pred_line_mgt), group = Line, colour = Line), lty = 2,
+              geom = "line", alpha = 0.5, method = "gam", formula = y ~ s(x, bs = "tp", k = 3), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp, y = MGT, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp, y = exp(pred_pop_mgt)), 
+              method = "gam", formula = y ~ s(x, bs = "tp"), colour = "black", fullrange = FALSE) +
+  #stat_summary(fun.data = "mean_se", size = 0.7, orientation = x) +
+  stat_summary_bin(fun.data = "mean_se", size = 0.7, binwidth = 1.6, orientation = "x") +
+  ylab(bquote(atop(Mean~germination,time~(days)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 33, 3), limits = c(11, 33)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + 
+  #guides(colour = guide_legend(nrow = 4))
+
+
+# Chlorophyll content: best model = chlcon_quad_intA_intM
+
+predicted_data <- data.frame(Chlorophyll_content_etr = F2data$Chlorophyll_content_etr,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_chlcon <- predict(chlcon_quad_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_chlcon <- predict(chlcon_quad_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+chlcon_fig1e <- 
+ggplot(F2data, aes(x = Temp_rosette, y = Chlorophyll_content_etr)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_chlcon, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Chlorophyll_content_etr, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_chlcon),
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") + 
+  stat_summary(fun.data = "mean_se", size = 0.7) +
+  ylab(bquote(atop(Chlorophyll~content,(SPAD~units)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# LMA: best model = lma_quad_init_intA_intM
+predicted_data <- data.frame(LMAmean = F2data$LMAmean,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_lma <- predict(lma_quad_init_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_lma <- predict(lma_quad_init_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+  
+lma_fig1f <- 
+ggplot(F2data, aes(x = Temp_rosette, y = LMAmean)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_lma, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = LMAmean, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_lma),
+              method = "lm", formula = y ~ poly(x,2), colour = "black") + 
+  stat_summary(fun.data = "mean_se", size = 0.7) +
+  ylab(bquote(atop(Leaf~mass~per~area,~(mg~cm^-2)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# Rosette diameter increment: best model = rosette_quad_init_intA_rrM
+predicted_data <- data.frame(Early_growth10 = F2data$Early_growth10,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_growth <- predict(rosette_quad_init_intA_rrM, re.form = NA)[,1]
+predicted_data$pred_line_growth <- predict(rosette_quad_init_intA_rrM, re.form = ~(1|animal) + (1+cTemp_rosette|Mother))[,1]
+
+rosette_fig1g <- 
+ggplot(F2data, aes(x = Temp_rosette, y = Early_growth)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_growth/100, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Early_growth, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_growth/100),
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") + 
+  stat_summary(fun.data = "mean_se", size = 0.7) +
+  ylab(bquote(atop(Relative~rosette~diameter,growth~increment))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# Above-ground biomass: best model = biomass_quad_intA_intM
+predicted_data <- data.frame(Above_ground_biomass_g = F2data$Above_ground_biomass_g,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_biomass <- predict(biomass_quad_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_biomass <- predict(biomass_quad_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+biomass_fig1h <- 
+ggplot(F2data, aes(x = Temp_rosette, y = Above_ground_biomass_g)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_biomass, group = Line, colour = Line), lty = 2,
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Above_ground_biomass_g, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_biomass), 
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Above-ground~biomass~(g)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# phiPSII: best model = phipsii_quad_intA_intM
+predicted_data <- data.frame(phipsii = F2data$phipsii,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_phipsii  <- predict(phipsii_quad_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_phipsii <- predict(phipsii_quad_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+phipsii_fig1i <-
+ggplot(F2data, aes(x = Temp_rosette, y = phipsii)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_phipsii/10, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = phipsii, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_phipsii/10),
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Photosynthetic~efficiency,phi~PSII))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# Fv/Fm: best model = fvfm_quad_rrA_intM
+predicted_data <- data.frame(fvfm_hot = F2data$fvfm_hot,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_fvfm <- predict(fvfm_quad_rrA_intM, re.form = NA)[,1]
+predicted_data$pred_line_fvfm <- predict(fvfm_quad_rrA_intM, re.form = ~(1+cTemp_rosette|animal) + (1|Mother))[,1]
+
+fvfm_fig1j <-
+ggplot(F2data, aes(x = Temp_rosette, y = fvfm_hot)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_fvfm/10, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x,2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = fvfm_hot, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_fvfm/10),
+              method = "lm", formula = y ~ poly(x,2), colour = "black") + ylim(0.69,0.82) +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Photosynthetic~efficiency,italic(F)[V]/~italic(F)[M]))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# CTmax: best model = ctmax_quad_rrA_rrM
+predicted_data <- data.frame(Tcrit_hot = F2data$Tcrit.break_hot,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_Tcrit_hot  <- predict(ctmax_quad_rrA_rrM, re.form = NA)[,1]
+predicted_data$pred_line_Tcrit_hot <- predict(ctmax_quad_rrA_rrM, 
+                                              re.form = ~(1 + cTemp_rosette|animal) + (1 + cTemp_rosette|Mother))[,1]
+
+ctmax_fig1k <-
+ggplot(F2data, aes(x = Temp_rosette, y = Tcrit.break_hot)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_Tcrit_hot, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Tcrit.break_hot, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_Tcrit_hot),
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Heat~tolerance,italic(T)[crit-hot]~(degree~C)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# Tmax: best model = tmax_lm_intA_intM
+predicted_data <- data.frame(Tmax_hot = F2data$Tmax_hot,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_Tmax_hot  <- predict(tmax_lm_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_Tmax_hot <- predict(tmax_lm_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+tmax_fig1l <-
+ggplot(F2data, aes(x = Temp_rosette, y = Tmax_hot)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_Tmax_hot, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ x, 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Tmax_hot, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_Tmax_hot),,
+              method = "lm", formula = y ~ x, colour = "black") + 
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Heat~threshold,italic(T)[max-hot]~(degree~C)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# CTmin: best model = ctmin_lm_intA_intM
+predicted_data <- data.frame(Tcrit_cold = F2data$Tcrit.break_cold,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_Tcrit_cold  <- predict(ctmin_lm_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_Tcrit_cold <- predict(ctmin_lm_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+ctmin_fig1m <-
+ggplot(F2data, aes(x = Temp_rosette, y = Tcrit.break_cold)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_Tcrit_cold, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ x, se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Tcrit.break_cold, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_Tcrit_cold),
+              method = "lm", formula = y ~ x, colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Cold~tolerance,italic(T)[crit-cold]~(degree~C)))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# NT: best model = nt_lm_intA_intM
+predicted_data <- data.frame(Nuc_temp = F2data$Nuc_temp,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data),]
+predicted_data$pred_pop_Nuc_temp  <- predict(nt_lm_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_Nuc_temp <- predict(nt_lm_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+nt_fig1n <-
+ggplot(F2data, aes(x = Temp_rosette, y = Nuc_temp)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_Nuc_temp, group = Line, colour = Line), lty = 2, 
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ x, se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Nuc_temp, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_Nuc_temp),
+              method = "lm", formula = y ~ x, colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Freezing~point,italic(NT)~(degree~C)))) + 
+  xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+# Days to first flower: best model = dff_quad_init_intA_intM
+predicted_data <- data.frame(Days_first_flower_t = F2data$Days_first_flower_t,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_flower <- predict(dff_quad_init_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_flower <- predict(dff_quad_init_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+flower_fig1o <- 
+ggplot(F2data, aes(x = Temp_rosette, y = Days_first_flower_t)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_flower, group = Line, colour = Line), lty = 2,
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2), 
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = Days_first_flower_t, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_flower), 
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab("Flowering onset (days)") + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+# N flowers and caps: best model = repro_quad_init_intA_intM
+predicted_data <- data.frame(N_flowers_caps = F2data$N_flowers_caps,
+                             Temp_rosette = F2data$Temp_rosette,
+                             Temp_rosette2 = I(F2data$Temp_rosette^2),
+                             Line = F2data$Line)
+predicted_data <- predicted_data[complete.cases(predicted_data), ]
+predicted_data$pred_pop_Nflowers <- predict(repro_quad_init_intA_intM, re.form = NA)[,1]
+predicted_data$pred_line_Nflowers <- predict(repro_quad_init_intA_intM, re.form = ~(1|animal) + (1|Mother))[,1]
+
+fitness_fig1p <- 
+ggplot(F2data, aes(x = Temp_rosette, y = N_flowers_caps)) +
+  stat_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_line_Nflowers, group = Line, colour = Line), lty = 2,
+              geom = "line", alpha = 0.5, method = "lm", formula = y ~ poly(x, 2),
+              se = FALSE, size = 1, fullrange = FALSE) + 
+  geom_point(aes(x = Temp_rosette, y = N_flowers_caps, group = Line, colour = Line), alpha = 0.5) +
+  geom_smooth(data = predicted_data, aes(x = Temp_rosette, y = pred_pop_Nflowers), 
+              method = "lm", formula = y ~ poly(x, 2), colour = "black") +
+  stat_summary(fun.data = "mean_se", size = 0.7, orientation = "x") +
+  ylab(bquote(atop(Reproductive~stems,at~harvest~(italic(n))))) + xlab("Temperature (°C)") +
+  scale_colour_viridis_d(name = "Family") + theme_classic(base_size = 12) + 
+  scale_x_continuous(breaks = seq(11, 29, 4), limits = c(11, 28.5)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))# + guides(colour = guide_legend(nrow = 3))
+
+
+#fig1a #pic flower
+#fig1b #pic TGP
+#fig1c #germ
+#fig1d #mgt
+#fig1e #chlcon
+#fig1f #lma
+#fig1g #rosette
+#fig1h #biomass
+#fig1i #phipsii
+#fig1j #fvfm
+#fig1k #CTmax
+#fig1l #Tmax
+#fig1m #CTmin
+#fig1n #NT
+#fig1o #flowering onset
+#fig1p #fitness
+
+
+img1 <- readPNG("20210122_092608_crop2.png")
+
+img2 <- readPNG("Fig1b_TGP_image.png")
+
+fig1a <- ggplot() + 
+    background_image(img1) #+
+    # This ensures that the image leaves some space at the edges
+   # theme(plot.margin = margin(t=1, l=1, r=1, b=1, unit = "cm"))
+fig1b <- ggplot() + 
+    background_image(img2) #+
+    # This ensures that the image leaves some space at the edges
+    #theme(plot.margin = margin(t=1, l=1, r=1, b=1, unit = "cm"))
+
+figure1 <- 
+  ggarrange(fig1a, fig1b, germ_fig1c, mgt_fig1d,
+          chlcon_fig1e, lma_fig1f, rosette_fig1g, biomass_fig1h,
+          phipsii_fig1i, fvfm_fig1j, ctmax_fig1k, tmax_fig1l,
+          ctmin_fig1m, nt_fig1n, flower_fig1o, fitness_fig1p,
+          labels = c("(a)", "(b)", "(c)","(d)", 
+                     "(e)", "(f)","(g)", "(h)", 
+                     "(i)", "(j)", "(k)", "(l)",
+                     "(m)", "(n)", "(o)", "(p)"),
+          legend = "none", nrow = 4, ncol = 4, align = "hv")
+figure1$`1`
+
+pdf("figure1 R2 v1.pdf", width = 14, height = 12)
+figure1$`1`
+dev.off()
+
+
+```
+
+
+
+``` {r Figure 2: R2 models - Rev2}
+
+# germ Model 1
+germ_mod1 <- brm(Germ ~ Block + 
+                     (1|Line),
+                     data = F2germ, family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(germ_mod1)
+bayes_R2(germ_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(germ_mod1, re.form = NA)   # marginal (without random)
+
+# germ Model 2
+germ_mod2 <- brm(Germ ~ s(cTemp, k = 8, bs = "tp") + Block +
+                     (1|Line),
+                     data = F2germ, family = "zero_inflated_negbinomial", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(germ_mod2)
+bayes_R2(germ_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(germ_mod2, re.form = NA)   # marginal (without random)
+germ_R2_temp <- bayes_R2(germ_mod2, re.form = NA) - bayes_R2(germ_mod1, re.form = NA) 
+germ_R2_family <- bayes_R2(germ_mod2, re.form = NULL) - bayes_R2(germ_mod2, re.form = NA)
+
+save(germ_mod1, file = "output/germ_mod1.Rdata")
+save(germ_mod2, file = "output/germ_mod2.Rdata")
+
+germ_R2_temp
+germ_R2_family
+
+
+# MGT Model 1
+mgt_mod1 <- brm(log(MGT) ~ Block + 
+                     (1|Line),
+                     data = F2germ, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(mgt_mod1)
+bayes_R2(mgt_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(mgt_mod1, re.form = NA)   # marginal (without random)
+
+# MGT Model 2
+mgt_mod2 <- brm(log(MGT) ~ s(cTemp, k = 8, bs = "tp") + Block +
+                     (1|Line),
+                     data = F2germ, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(mgt_mod2)
+bayes_R2(mgt_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(mgt_mod2, re.form = NA)   # marginal (without random)
+mgt_R2_temp <- bayes_R2(mgt_mod2, re.form = NA) - bayes_R2(mgt_mod1, re.form = NA) 
+mgt_R2_family <- bayes_R2(mgt_mod2, re.form = NULL) - bayes_R2(mgt_mod2, re.form = NA)
+
+save(mgt_mod1, file = "output/MGT_mod1.Rdata")
+save(mgt_mod2, file = "output/MGT_mod2.Rdata")
+
+mgt_R2_temp
+mgt_R2_family
+
+
+# chlcon Model 1
+chlcon_mod1 <- brm(Chlorophyll_content_etr ~ 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(chlcon_mod1)
+bayes_R2(chlcon_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(chlcon_mod1, re.form = NA)   # marginal (without random)
+
+# chlcon Model 2
+chlcon_mod2 <- brm(Chlorophyll_content_etr ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(chlcon_mod2)
+bayes_R2(chlcon_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(chlcon_mod2, re.form = NA)   # marginal (without random)
+chlcon_R2_temp <- bayes_R2(chlcon_mod2, re.form = NA) - bayes_R2(chlcon_mod1, re.form = NA) 
+chlcon_R2_family <- bayes_R2(chlcon_mod2, re.form = NULL) - bayes_R2(chlcon_mod2, re.form = NA)
+
+save(chlcon_mod1, file = "output/chlcon_mod1.Rdata")
+save(chlcon_mod2, file = "output/chlcon_mod2.Rdata")
+
+chlcon_R2_temp
+chlcon_R2_family
+
+
+# lma Model 1
+lma_mod1 <- brm(LMAmean ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(lma_mod1)
+bayes_R2(lma_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(lma_mod1, re.form = NA)   # marginal (without random)
+
+# lma Model 2
+lma_mod2 <- brm(LMAmean ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(lma_mod2)
+bayes_R2(lma_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(lma_mod2, re.form = NA)   # marginal (without random)
+lma_R2_temp <- bayes_R2(lma_mod2, re.form = NA) - bayes_R2(lma_mod1, re.form = NA) 
+lma_R2_family <- bayes_R2(lma_mod2, re.form = NULL) - bayes_R2(lma_mod2, re.form = NA)
+
+save(lma_mod1, file = "output/lma_mod1.Rdata")
+save(lma_mod2, file = "output/lma_mod2.Rdata")
+lma_R2_temp
+lma_R2_family
+
+
+# days first flower Model 1
+days_mod1 <- brm(Days_first_flower_t ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(days_mod1)
+bayes_R2(days_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(days_mod1, re.form = NA)   # marginal (without random)
+
+# days first flower Model 2
+days_mod2 <- brm(Days_first_flower_t ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(days_mod2)
+bayes_R2(days_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(days_mod2, re.form = NA)   # marginal (without random)
+days_R2_temp <- bayes_R2(days_mod2, re.form = NA) - bayes_R2(days_mod1, re.form = NA) 
+days_R2_family <- bayes_R2(days_mod2, re.form = NULL) - bayes_R2(days_mod2, re.form = NA)
+
+save(days_mod1, file = "output/days_mod1.Rdata")
+save(days_mod2, file = "output/days_mod2.Rdata")
+
+days_R2_temp
+days_R2_family
+
+# fvfm Model 1
+fvfm_mod1 <- brm(fvfm_hot10 ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(fvfm_mod1)
+bayes_R2(fvfm_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(fvfm_mod1, re.form = NA)   # marginal (without random)
+
+# fvfm Model 2
+fvfm_mod2 <- brm(fvfm_hot10 ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(fvfm_mod2)
+bayes_R2(fvfm_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(fvfm_mod2, re.form = NA)   # marginal (without random)
+fvfm_R2_temp <- bayes_R2(fvfm_mod2, re.form = NA) - bayes_R2(fvfm_mod1, re.form = NA) 
+fvfm_R2_family <- bayes_R2(fvfm_mod2, re.form = NULL) - bayes_R2(fvfm_mod2, re.form = NA)
+
+save(fvfm_mod1, file = "output/fvfm_mod1.Rdata")
+save(fvfm_mod2, file = "output/fvfm_mod2.Rdata")
+
+fvfm_R2_temp
+fvfm_R2_family
+
+# phipsii Model 1
+phipsii_mod1 <- brm(phipsii10 ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(phipsii_mod1)
+bayes_R2(phipsii_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(phipsii_mod1, re.form = NA)   # marginal (without random)
+
+# phipsii Model 2
+phipsii_mod2 <- brm(phipsii10 ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(phipsii_mod2)
+bayes_R2(phipsii_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(phipsii_mod2, re.form = NA)   # marginal (without random)
+phipsii_R2_temp <- bayes_R2(phipsii_mod2, re.form = NA) - bayes_R2(phipsii_mod1, re.form = NA)
+phipsii_R2_family <- bayes_R2(phipsii_mod2, re.form = NULL) - bayes_R2(phipsii_mod2, re.form = NA)
+
+save(phipsii_mod1, file = "output/phipsii_mod1.Rdata")
+save(phipsii_mod2, file = "output/phipsii_mod2.Rdata")
+
+phipsii_R2_temp
+phipsii_R2_family
+
+
+# CTmax Model 1
+ctmax_mod1 <- brm(Tcrit.break_hot ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(ctmax_mod1)
+bayes_R2(ctmax_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(ctmax_mod1, re.form = NA)   # marginal (without random)
+
+# CTmax Model 2
+ctmax_mod2 <- brm(Tcrit.break_hot ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(ctmax_mod2)
+bayes_R2(ctmax_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(ctmax_mod2, re.form = NA)   # marginal (without random)
+ctmax_R2_temp <- bayes_R2(ctmax_mod2, re.form = NA) - bayes_R2(ctmax_mod1, re.form = NA)
+ctmax_R2_family <- bayes_R2(ctmax_mod2, re.form = NULL) - bayes_R2(ctmax_mod2, re.form = NA)
+
+save(ctmax_mod1, file = "output/ctmax_mod1.Rdata")
+save(ctmax_mod2, file = "output/ctmax_mod2.Rdata")
+
+ctmax_R2_temp
+ctmax_R2_family
+
+
+# Tmax Model 1
+tmax_mod1 <- brm(Tmax_hot ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(tmax_mod1)
+bayes_R2(tmax_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(tmax_mod1, re.form = NA)   # marginal (without random)
+
+# Tmax Model 2
+tmax_mod2 <- brm(Tmax_hot ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(tmax_mod2)
+bayes_R2(tmax_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(tmax_mod2, re.form = NA)   # marginal (without random)
+tmax_R2_temp <- bayes_R2(tmax_mod2, re.form = NA) - bayes_R2(tmax_mod1, re.form = NA) 
+tmax_R2_family <- bayes_R2(tmax_mod2, re.form = NULL) - bayes_R2(tmax_mod2, re.form = NA)
+
+save(tmax_mod1, file = "output/tmax_mod1v2.Rdata")
+save(tmax_mod2, file = "output/tmax_mod2.Rdata")
+
+tmax_R2_temp
+tmax_R2_family
+
+# CTmin Model 1
+ctmin_mod1 <- brm(Tcrit.break_cold ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(ctmin_mod1)
+bayes_R2(ctmin_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(ctmin_mod1, re.form = NA)   # marginal (without random)
+
+# CTmin Model 2
+ctmin_mod2 <- brm(Tcrit.break_cold ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(ctmin_mod2)
+bayes_R2(ctmin_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(ctmin_mod2, re.form = NA)   # marginal (without random)
+ctmin_R2_temp <- bayes_R2(ctmin_mod2, re.form = NA) - bayes_R2(ctmin_mod1, re.form = NA)
+ctmin_R2_family <- bayes_R2(ctmin_mod2, re.form = NULL) - bayes_R2(ctmin_mod2, re.form = NA)
+
+save(ctmin_mod1, file = "output/ctmin_mod1.Rdata")
+save(ctmin_mod2, file = "output/ctmin_mod2.Rdata")
+ctmin_R2_temp
+ctmin_R2_family
+
+# NT Model 1
+NT_mod1 <- brm(Nuc_temp ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(NT_mod1)
+bayes_R2(NT_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(NT_mod1, re.form = NA)   # marginal (without random)
+
+
+# NT Model 2
+NT_mod2 <- brm(Nuc_temp ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                 (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(NT_mod2)
+bayes_R2(NT_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(NT_mod2, re.form = NA)   # marginal (without random)
+NT_R2_temp <- bayes_R2(NT_mod2, re.form = NA) - bayes_R2(NT_mod1, re.form = NA) 
+NT_R2_family <- bayes_R2(NT_mod2, re.form = NULL) - bayes_R2(NT_mod2, re.form = NA)
+
+save(NT_mod1, file = "output/NT_mod1.Rdata")
+save(NT_mod2, file = "output/NT_mod2.Rdata")
+
+NT_R2_temp
+NT_R2_family
+
+# repro stems Model 1
+repro_mod1 <- brm(N_flowers_caps ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(repro_mod1)
+bayes_R2(repro_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(repro_mod1, re.form = NA)   # marginal (without random)
+
+# repro stems Model 2
+repro_mod2 <- brm(N_flowers_caps ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(repro_mod2)
+bayes_R2(repro_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(repro_mod2, re.form = NA)   # marginal (without random)
+repro_R2_temp <- bayes_R2(repro_mod2, re.form = NA) - bayes_R2(repro_mod1, re.form = NA)
+repro_R2_family <- bayes_R2(repro_mod2, re.form = NULL) - bayes_R2(repro_mod2, re.form = NA)
+
+save(repro_mod1, file = "output/repro_mod1.Rdata")
+save(repro_mod2, file = "output/repro_mod2.Rdata")
+repro_R2_temp
+repro_R2_family
+
+# biomass Model 1
+biomass_mod1 <- brm(Above_ground_biomass_g ~ Block +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(biomass_mod1)
+bayes_R2(biomass_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(biomass_mod1, re.form = NA)   # marginal (without random)
+
+# biomass Model 2
+biomass_mod2 <- brm(Above_ground_biomass_g ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(biomass_mod2)
+bayes_R2(biomass_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(biomass_mod2, re.form = NA)   # marginal (without random)
+biomass_R2_temp <- bayes_R2(biomass_mod2, re.form = NA) - bayes_R2(biomass_mod1, re.form = NA)
+biomass_R2_family <- bayes_R2(biomass_mod2, re.form = NULL) - bayes_R2(biomass_mod2, re.form = NA)
+
+save(biomass_mod1, file = "output/biomass_mod1.Rdata")
+save(biomass_mod2, file = "output/biomass_mod2.Rdata")
+biomass_R2_temp
+biomass_R2_family
+
+# growth Model 1
+growth_mod1 <- brm(Early_growth10 ~ Block + 
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(growth_mod1)
+bayes_R2(growth_mod1, re.form = NULL) # conditional (with random effects)
+bayes_R2(growth_mod1, re.form = NA)   # marginal (without random)
+
+growth_mod2 <- brm(Early_growth10 ~ Block + cTemp_rosette + cTemp_rosette2 + 
+                      Block:(cTemp_rosette + cTemp_rosette2) +
+                     (1|Line),
+                     data = F2data, family = "gaussian", chains = 4, iter = 4000, thin = 2,
+                   control = list(adapt_delta = 0.99), seed = 21)
+summary(growth_mod2)
+bayes_R2(growth_mod2, re.form = NULL) # conditional (with random effects)
+bayes_R2(growth_mod2, re.form = NA)   # marginal (without random)
+growth_R2_temp <- bayes_R2(growth_mod2, re.form = NA) - bayes_R2(growth_mod1, re.form = NA)
+growth_R2_family <- bayes_R2(growth_mod2, re.form = NULL) - bayes_R2(growth_mod2, re.form = NA)
+
+save(growth_mod1, file = "output/growth_mod1.Rdata")
+save(growth_mod2, file = "output/growth_mod2.Rdata")
+growth_R2_temp
+growth_R2_family
+
+```
+
+
+```{r load in R2 models and calculate - Rev2}
+
+germ_mod1 <- get(load(file = "output R1/germ_mod1.Rdata"))
+germ_mod2 <- get(load(file = "output R1/germ_mod2.Rdata"))
+
+germ_R2_temp <- bayes_R2(germ_mod2, re.form = NA) - bayes_R2(germ_mod1, re.form = NA) 
+germ_R2_family <- bayes_R2(germ_mod2, re.form = NULL) - bayes_R2(germ_mod2, re.form = NA)
+germ_R2_fe <- bayes_R2(germ_mod2, re.form = NA)
+
+mgt_mod1 <- get(load(file = "output R1/mgt_mod1.Rdata"))
+mgt_mod2 <- get(load(file = "output R1/mgt_mod2.Rdata"))
+
+mgt_R2_temp <- bayes_R2(mgt_mod2, re.form = NA) - bayes_R2(mgt_mod1, re.form = NA) 
+mgt_R2_family <- bayes_R2(mgt_mod2, re.form = NULL) - bayes_R2(mgt_mod2, re.form = NA)
+mgt_R2_fe <- bayes_R2(mgt_mod2, re.form = NA) 
+
+chlcon_mod1 <- get(load(file = "output R1/chlcon_mod1.Rdata"))
+chlcon_mod2 <- get(load(file = "output R1/chlcon_mod2.Rdata"))
+
+chlcon_R2_temp <- bayes_R2(chlcon_mod2, re.form = NA) - bayes_R2(chlcon_mod1, re.form = NA) 
+chlcon_R2_family <- bayes_R2(chlcon_mod2, re.form = NULL) - bayes_R2(chlcon_mod2, re.form = NA)
+chlcon_R2_fe <- bayes_R2(chlcon_mod2, re.form = NA) 
+
+lma_mod1 <- get(load(file = "output R1/lma_mod1.Rdata"))
+lma_mod2 <- get(load(file = "output R1/lma_mod2.Rdata"))
+
+lma_R2_temp <- bayes_R2(lma_mod2, re.form = NA) - bayes_R2(lma_mod1, re.form = NA) 
+lma_R2_family <- bayes_R2(lma_mod2, re.form = NULL) - bayes_R2(lma_mod2, re.form = NA)
+lma_R2_fe <- bayes_R2(lma_mod2, re.form = NA)
+
+days_mod1 <- get(load(file = "output R1/days_mod1.Rdata"))
+days_mod2 <- get(load(file = "output R1/days_mod2.Rdata"))
+
+days_R2_temp <- bayes_R2(days_mod2, re.form = NA) - bayes_R2(days_mod1, re.form = NA) 
+days_R2_family <- bayes_R2(days_mod2, re.form = NULL) - bayes_R2(days_mod2, re.form = NA)
+days_R2_fe <- bayes_R2(days_mod2, re.form = NA) 
+
+fvfm_mod1 <- get(load(file = "output R1/fvfm_mod1.Rdata"))
+fvfm_mod2 <- get(load(file = "output R1/fvfm_mod2.Rdata"))
+
+fvfm_R2_temp <- bayes_R2(fvfm_mod2, re.form = NA) - bayes_R2(fvfm_mod1, re.form = NA) 
+fvfm_R2_family <- bayes_R2(fvfm_mod2, re.form = NULL) - bayes_R2(fvfm_mod2, re.form = NA)
+fvfm_R2_fe <- bayes_R2(fvfm_mod2, re.form = NA) 
+
+
+phipsii_mod1 <- get(load(file = "output R1/phipsii_mod1.Rdata"))
+phipsii_mod2 <- get(load(file = "output R1/phipsii_mod2.Rdata"))
+
+phipsii_R2_temp <- bayes_R2(phipsii_mod2, re.form = NA) - bayes_R2(phipsii_mod1, re.form = NA) 
+phipsii_R2_family <- bayes_R2(phipsii_mod2, re.form = NULL) - bayes_R2(phipsii_mod2, re.form = NA)
+phipsii_R2_fe <- bayes_R2(phipsii_mod2, re.form = NA) 
+
+ctmax_mod1 <- get(load(file = "output R1/ctmax_mod1.Rdata"))
+ctmax_mod2 <- get(load(file = "output R1/ctmax_mod2.Rdata"))
+
+ctmax_R2_temp <- bayes_R2(ctmax_mod2, re.form = NA) - bayes_R2(ctmax_mod1, re.form = NA) 
+ctmax_R2_family <- bayes_R2(ctmax_mod2, re.form = NULL) - bayes_R2(ctmax_mod2, re.form = NA)
+ctmax_R2_fe <- bayes_R2(ctmax_mod2, re.form = NA) 
+
+tmax_mod1 <- get(load(file = "output R1/tmax_mod1.Rdata"))
+tmax_mod2 <- get(load(file = "output R1/tmax_mod2.Rdata"))
+
+tmax_R2_temp <- bayes_R2(tmax_mod2, re.form = NA) - bayes_R2(tmax_mod1, re.form = NA) 
+tmax_R2_family <- bayes_R2(tmax_mod2, re.form = NULL) - bayes_R2(tmax_mod2, re.form = NA)
+tmax_R2_fe <- bayes_R2(tmax_mod2, re.form = NA) 
+
+ctmin_mod1 <- get(load(file = "output R1/ctmin_mod1.Rdata"))
+ctmin_mod2 <- get(load(file = "output R1/ctmin_mod2.Rdata"))
+
+ctmin_R2_temp <- bayes_R2(ctmin_mod2, re.form = NA) - bayes_R2(ctmin_mod1, re.form = NA) 
+ctmin_R2_family <- bayes_R2(ctmin_mod2, re.form = NULL) - bayes_R2(ctmin_mod2, re.form = NA)
+ctmin_R2_fe <- bayes_R2(ctmin_mod2, re.form = NA) 
+
+NT_mod1 <- get(load(file = "output R1/NT_mod1.Rdata"))
+NT_mod2 <- get(load(file = "output R1/NT_mod2.Rdata"))
+
+NT_R2_temp <- bayes_R2(NT_mod2, re.form = NA) - bayes_R2(NT_mod1, re.form = NA) 
+NT_R2_family <- bayes_R2(NT_mod2, re.form = NULL) - bayes_R2(NT_mod2, re.form = NA)
+NT_R2_fe <- bayes_R2(NT_mod2, re.form = NA) 
+
+repro_mod1 <- get(load(file = "output R1/repro_mod1.Rdata"))
+repro_mod2 <- get(load(file = "output R1/repro_mod2.Rdata"))
+
+repro_R2_temp <- bayes_R2(repro_mod2, re.form = NA) - bayes_R2(repro_mod1, re.form = NA) 
+repro_R2_family <- bayes_R2(repro_mod2, re.form = NULL) - bayes_R2(repro_mod2, re.form = NA)
+repro_R2_fe <- bayes_R2(repro_mod2, re.form = NA) 
+
+biomass_mod1 <- get(load(file = "output R1/biomass_mod1.Rdata"))
+biomass_mod2 <- get(load(file = "output R1/biomass_mod2.Rdata"))
+
+biomass_R2_temp <- bayes_R2(biomass_mod2, re.form = NA) - bayes_R2(biomass_mod1, re.form = NA) 
+biomass_R2_family <- bayes_R2(biomass_mod2, re.form = NULL) - bayes_R2(biomass_mod2, re.form = NA)
+biomass_R2_fe <- bayes_R2(biomass_mod2, re.form = NA) 
+
+growth_mod1 <- get(load(file = "output R1/growth_mod1.Rdata"))
+growth_mod2 <- get(load(file = "output R1/growth_mod2.Rdata"))
+
+growth_R2_temp <- bayes_R2(growth_mod2, re.form = NA) - bayes_R2(growth_mod1, re.form = NA) 
+growth_R2_family <- bayes_R2(growth_mod2, re.form = NULL) - bayes_R2(growth_mod2, re.form = NA)
+growth_R2_fe <- bayes_R2(growth_mod2, re.form = NA) 
+
+
+```
+
+
+
+``` {r Generate R2 dataset - Rev2}
+
+# Generate a matrix dataframe to contain the R2 values
+
+R2_data <- matrix(nrow = 42, ncol = 5)
+
+rownames(R2_data) <- rep(c("Final germination count",
+                       "MGT",
+                       "Chlorophyll content",
+                       "LMA",
+                       "Flowering onset",
+                       "Fv/Fm",
+                       "phiPSII",
+                       "CTMAX",
+                       "Tmax",
+                       "CTMIN",
+                       "NT",
+                       "Reproductive stems",
+                       "Growth increment",
+                       "Biomass"), 3)
+colnames(R2_data) <- c("Component",
+                       "Estimate",
+                       "Est. error",
+                       "L 95% CI",
+                       "U 95% CI")
+
+R2_data[1:14,1] <- "Temperature"
+R2_data[15:28,1] <- "Family"
+R2_data[29:42,1] <- "Fixed"
+R2_data
+
+# Populate the matrix dataframe
+
+# R2 for temp
+R2_data[1,2:5] <- germ_R2_temp[,1:4]
+R2_data[2,2:5] <- mgt_R2_temp[,1:4]
+R2_data[3,2:5] <- chlcon_R2_temp[,1:4]
+R2_data[4,2:5] <- lma_R2_temp[,1:4]
+R2_data[5,2:5] <- days_R2_temp[,1:4]
+R2_data[6,2:5] <- fvfm_R2_temp[,1:4]
+R2_data[7,2:5] <- phipsii_R2_temp[,1:4]
+R2_data[8,2:5] <- ctmax_R2_temp[,1:4]
+R2_data[9,2:5] <- tmax_R2_temp[,1:4]
+R2_data[10,2:5] <- ctmin_R2_temp[,1:4]
+R2_data[11,2:5] <- NT_R2_temp[,1:4]
+R2_data[12,2:5] <- repro_R2_temp[,1:4]
+R2_data[13,2:5] <- growth_R2_temp[,1:4]
+R2_data[14,2:5] <- biomass_R2_temp[,1:4]
+
+# R2 for family
+R2_data[15,2:5] <- germ_R2_family[,1:4]
+R2_data[16,2:5] <- mgt_R2_family[,1:4]
+R2_data[17,2:5] <- chlcon_R2_family[,1:4]
+R2_data[18,2:5] <- lma_R2_family[,1:4]
+R2_data[19,2:5] <- days_R2_family[,1:4]
+R2_data[20,2:5] <- fvfm_R2_family[,1:4]
+R2_data[21,2:5] <- phipsii_R2_family[,1:4]
+R2_data[22,2:5] <- ctmax_R2_family[,1:4]
+R2_data[23,2:5] <- tmax_R2_family[,1:4]
+R2_data[24,2:5] <- ctmin_R2_family[,1:4]
+R2_data[25,2:5] <- NT_R2_family[,1:4]
+R2_data[26,2:5] <- repro_R2_family[,1:4]
+R2_data[27,2:5] <- growth_R2_family[,1:4]
+R2_data[28,2:5] <- biomass_R2_family[,1:4]
+
+# R2 for fixed effects
+R2_data[29,2:5] <- germ_R2_fe[,1:4]
+R2_data[30,2:5] <- mgt_R2_fe[,1:4]
+R2_data[31,2:5] <- chlcon_R2_fe[,1:4]
+R2_data[32,2:5] <- lma_R2_fe[,1:4]
+R2_data[33,2:5] <- days_R2_fe[,1:4]
+R2_data[34,2:5] <- fvfm_R2_fe[,1:4]
+R2_data[35,2:5] <- phipsii_R2_fe[,1:4]
+R2_data[36,2:5] <- ctmax_R2_fe[,1:4]
+R2_data[37,2:5] <- tmax_R2_fe[,1:4]
+R2_data[38,2:5] <- ctmin_R2_fe[,1:4]
+R2_data[39,2:5] <- NT_R2_fe[,1:4]
+R2_data[40,2:5] <- repro_R2_fe[,1:4]
+R2_data[41,2:5] <- growth_R2_fe[,1:4]
+R2_data[42,2:5] <- biomass_R2_fe[,1:4]
+
+R2_data <- noquote(R2_data)
+R2_data
+
+R2_data2 <- as.data.frame(cbind(R2_data[1:14,2:5], R2_data[15:28,2:5], R2_data[29:42,2:5]))
+
+colnames(R2_data2) <- c("T.Estimate",
+                       "T.error",
+                       "T.lower",
+                       "T.upper",
+                       "F.Estimate",
+                       "F.error",
+                       "F.lower",
+                       "F.upper",
+                       "FE.Estimate",
+                       "FE.error",
+                       "FE.lower",
+                       "FE.upper")
+#R2_data2 <- noquote(R2_data2)
+#R2_data2 <- data.frame(R2_data2)
+R2_data2
+str(R2_data2)
+
+R2_data2[,1] <- as.numeric(R2_data2[,1])
+R2_data2[,2] <- as.numeric(R2_data2[,2])
+R2_data2[,3] <- as.numeric(R2_data2[,3])
+R2_data2[,4] <- as.numeric(R2_data2[,4])
+R2_data2[,5] <- as.numeric(R2_data2[,5])
+R2_data2[,6] <- as.numeric(R2_data2[,6])
+R2_data2[,7] <- as.numeric(R2_data2[,7])
+R2_data2[,8] <- as.numeric(R2_data2[,8])
+R2_data2[,9] <- as.numeric(R2_data2[,9])
+R2_data2[,10] <- as.numeric(R2_data2[,10])
+R2_data2[,11] <- as.numeric(R2_data2[,11])
+R2_data2[,12] <- as.numeric(R2_data2[,12])
+R2_data2$Trait <- c("Final germination count",
+                       "MGT",
+                       "Chlorophyll content",
+                       "LMA",
+                       "Flowering onset",
+                       "Fv/Fm",
+                       "phiPSII",
+                       "CTMAX",
+                       "Tmax",
+                       "CTMIN",
+                       "NT",
+                       "Reproductive stems",
+                       "Growth increment",
+                       "Biomass")
+R2_data2$Type <- c("Germination",
+                   "Germination",
+                   "Leaf",
+                   "Leaf",
+                   "Reproductive fitness",
+                   "Physiology",
+                   "Physiology",
+                   "Physiology",
+                   "Physiology",
+                   "Physiology",
+                   "Physiology",
+                   "Reproductive fitness",
+                   "Leaf",
+                   "Leaf")
+  
+
+R2_data2$Trait <- as.factor(R2_data2$Trait)
+R2_data2$Type <- as.factor(R2_data2$Type)
+str(R2_data2)
+
+R2_data2$T.SD <- sqrt(abs(R2_data2$T.error))
+R2_data2$F.SD <- sqrt(abs(R2_data2$F.error))
+R2_data2$FE.SD <- sqrt(abs(R2_data2$FE.error))
+
+str(R2_data2)
+
+
+```
+
+
+```{r Table S5}
+
+tab_s5 <- data.frame(R2_data2$Trait, R2_data2$Type, 
+                           round(R2_data2$T.Estimate,3), abs(round(R2_data2$T.error,3)), 
+                           round(R2_data2$F.Estimate,3), abs(round(R2_data2$F.error,3)))
+colnames(tab_s5) <- c("Trait", "Trait type", "TempVar", "TempVar SD",
+                      "FamilyVar", "FamilyVar SD)")
+
+tab_s5
+
+```
+
+
+``` {r Figure 2 R2 temp x R2 family - Rev2}
+
+pal <- c("#000000","#004949","#009292","#ff6db6","#ffb6db",
+ "#490092","#006ddb","#b66dff","#6db6ff","#b6dbff",
+ "#920000","#924900","#db6d00","#24ff24","#ffff6d")
+
+ggplot(R2_data2, aes(x = T.Estimate, y = F.Estimate, colour = Trait, shape = Trait, fill = Trait)) +
+  geom_point(size = 3) +
+  geom_abline(slope = 1, intercept = 0, lty = 2, alpha = 0.5) +
+  geom_linerange(aes(xmin = T.Estimate-T.SD, xmax = T.Estimate+T.SD)) +
+  geom_linerange(aes(ymin = F.Estimate-F.SD, ymax = F.Estimate+F.SD)) +
+  ylab(bquote(Family~component~({italic(R)^2}[conditional]-{italic(R)^2}[marginal]))) + 
+  xlab(bquote(Temperature~component~({italic(R)^2}[marginal]))) +
+  theme_classic(base_size = 12) +
+  scale_x_continuous(limits = c(-0.08, 0.65)) + 
+  scale_y_continuous(limits = c(-0.08, 0.65)) +
+  scale_colour_manual(name = "Trait type: Trait",
+                      limits = c("Final germination count",
+                                    "MGT",
+                                    "Chlorophyll content",
+                                    "LMA",
+                                    "Growth increment",
+                                    "Biomass",
+                                    "phiPSII",
+                                    "Fv/Fm",
+                                    "CTMAX",
+                                    "Tmax",
+                                    "CTMIN",
+                                    "NT",
+                                    "Flowering onset",
+                                    "Reproductive stems"),
+                      labels = c(bquote(Germination:~Germination~count),
+                                    bquote(Germination:~Mean~germination~time),
+                                    bquote(Leaf:~Chlorophyll~content),
+                                    bquote(Leaf:~Leaf~mass~per~area),
+                                    bquote(Leaf:~Rosette~diameter~increment),
+                                    bquote(Leaf:~Above-ground~biomass),
+                                    bquote(Physiology:~phi~PSII),
+                                    bquote(Physiology:~italic(F)[V]/italic(F)[M]),
+                                    bquote(Physiology:~italic(T)[crit-hot]),
+                                    bquote(Physiology:~italic(T)[max-hot]),
+                                    bquote(Physiology:~italic(T)[crit-cold]),
+                                    bquote(Physiology:~italic(NT)),
+                                    bquote(Fitness:~Flowering~onset),
+                                    bquote(Fitness:~Reproductive~stems)),
+                      values = c(pal[12],pal[12],pal[14],pal[14],pal[14],pal[14],
+                                 pal[9],pal[9],pal[9],pal[9],pal[9],pal[9],pal[8],pal[8])) +
+  scale_fill_manual(name = "Trait type: Trait",
+                    limits = c("Final germination count",
+                                    "MGT",
+                                    "Chlorophyll content",
+                                    "LMA",
+                                    "Growth increment",
+                                    "Biomass",
+                                    "phiPSII",
+                                    "Fv/Fm",
+                                    "CTMAX",
+                                    "Tmax",
+                                    "CTMIN",
+                                    "NT",
+                                    "Flowering onset",
+                                    "Reproductive stems"),
+                    labels = c(bquote(Germination:~Germination~count),
+                                    bquote(Germination:~Mean~germination~time),
+                                    bquote(Leaf:~Chlorophyll~content),
+                                    bquote(Leaf:~Leaf~mass~per~area),
+                                    bquote(Leaf:~Rosette~diameter~increment),
+                                    bquote(Leaf:~Above-ground~biomass),
+                                    bquote(Physiology:~phi~PSII),
+                                    bquote(Physiology:~italic(F)[V]/italic(F)[M]),
+                                    bquote(Physiology:~italic(T)[crit-hot]),
+                                    bquote(Physiology:~italic(T)[max-hot]),
+                                    bquote(Physiology:~italic(T)[crit-cold]),
+                                    bquote(Physiology:~italic(NT)),
+                                    bquote(Fitness:~Flowering~onset),
+                                    bquote(Fitness:~Reproductive~stems)),
+                    values = c(pal[12],pal[12],pal[14],pal[14],pal[14],pal[14],
+                                 pal[9],pal[9],pal[9],pal[9],pal[9],pal[9],pal[8],pal[8])) +
+  scale_shape_manual(name = "Trait type: Trait", 
+                         limits = c("Final germination count",
+                                    "MGT",
+                                    "Chlorophyll content",
+                                    "LMA",
+                                    "Growth increment",
+                                    "Biomass",
+                                    "phiPSII",
+                                    "Fv/Fm",
+                                    "CTMAX",
+                                    "Tmax",
+                                    "CTMIN",
+                                    "NT",
+                                    "Flowering onset",
+                                    "Reproductive stems"),
+                         labels = c(bquote(Germination:~Germination~count),
+                                    bquote(Germination:~Mean~germination~time),
+                                    bquote(Leaf:~Chlorophyll~content),
+                                    bquote(Leaf:~Leaf~mass~per~area),
+                                    bquote(Leaf:~Rosette~diameter~increment),
+                                    bquote(Leaf:~Above-ground~biomass),
+                                    bquote(Physiology:~phi~PSII),
+                                    bquote(Physiology:~italic(F)[V]/italic(F)[M]),
+                                    bquote(Physiology:~italic(T)[crit-hot]),
+                                    bquote(Physiology:~italic(T)[max-hot]),
+                                    bquote(Physiology:~italic(T)[crit-cold]),
+                                    bquote(Physiology:~italic(NT)),
+                                    bquote(Fitness:~Flowering~onset),
+                                    bquote(Fitness:~Reproductive~stems)),
+                     values = c(21:22, 21:24, 21:25, 4, 21:22)) +
+  theme(legend.position = c(0.2,0.7)) +
+  theme(axis.ticks.length = unit(-0.15,"cm"))
+
+
+```
+
+
+
+
