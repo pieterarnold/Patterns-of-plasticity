@@ -34,29 +34,7 @@ options(buildtools.check = function(action) TRUE)
 
 ```{r load data}
 
-F2germ <- read.csv("/Users/u1058369/Dropbox/Pieter/ANU/Wahlenbergia project/F2 experiment 2019/F2 shape of RN manuscript/R saved data files/F2germ.csv")
-
-# Remove the early replicates of lines that we later repeated in 2019
-# remove <- c("201:1", "203:2", "205:1", "206:2", "207:3", "209:1", "220:2", "221:1", "229:1", "230:3", "237:3")
-
-remove_block1 <- c("201", "205", "209", "221", "229")
-remove_block2 <- c("203", "206", "220")
-remove_block3 <- c("207", "230", "237")
-
-# Mean-centre the x variable (temperature at dish level)
-# From here on, use the mean-centred temperature (cTemp_rosette)
-F2germ_block1 <- subset(F2germ, F2germ$Block=="1")
-F2germ_block2 <- subset(F2germ, F2germ$Block=="2")
-F2germ_block3 <- subset(F2germ, F2germ$Block=="3")
-F2germ_block4 <- subset(F2germ, F2germ$Block=="4")
-F2germ_block5 <- subset(F2germ, F2germ$Block=="5")
-
-'%!in%' <- function(x,y)!('%in%'(x,y))
-F2germ_block1 <- F2germ_block1[F2germ_block1$Line %!in% remove_block1,]
-F2germ_block2 <- F2germ_block2[F2germ_block2$Line %!in% remove_block2,]
-F2germ_block3 <- F2germ_block3[F2germ_block3$Line %!in% remove_block3,]
-
-F2germ <- rbind(F2germ_block1, F2germ_block2, F2germ_block3, F2germ_block4, F2germ_block5)
+F2germ <- read.csv("F2germ_rev.csv")
 
 F2germ$Row <- as.factor(F2germ$Row)
 F2germ$Column <- as.factor(F2germ$Column)
@@ -69,7 +47,7 @@ F2germ$cTemp2 <- F2germ$cTemp^2
 F2germ$animal <- as.factor(F2germ$F2_ID)
 F2germ$Mother <- as.factor(F2germ$Mother)
 
-F2data <- read.csv("/Users/u1058369/Dropbox/Pieter/ANU/Wahlenbergia project/F2 experiment 2019/F2 shape of RN manuscript/R saved data files/F2growth.csv")
+F2data <- read.csv("F2growth.csv")
 
 Column_1 <- (paste(F2data$Column[F2data$Block=="1"],"_1", sep = ""))
 Column_2 <- (paste(F2data$Column[F2data$Block=="2"],"_2", sep = ""))
@@ -85,7 +63,7 @@ F2data$Block <- as.factor(F2data$Block)
 F2data$N_flowers_caps <- as.numeric(as.character(F2data$N_flowers_caps))
 F2data$Above_ground_biomass_g <- as.numeric(as.character(F2data$Above_ground_biomass_g))
 
-Ped <- read.csv("/Users/u1058369/Dropbox/Pieter/ANU/Wahlenbergia project/F2 experiment 2019/F2 shape of RN manuscript/R saved data files/F2_TGP_pedigree.csv")
+Ped <- read.csv("F2_TGP_pedigree.csv")
 
 for(x in 1:3) Ped[,x] <- as.factor(Ped[,x])
 
@@ -3107,9 +3085,9 @@ ggplot(F2data, aes(x = Temp_rosette, y = N_flowers_caps)) +
 
 
 
-img1 <- readPNG("/Users/u1058369/Dropbox/Pieter/ANU/Wahlenbergia project/F2 experiment 2019/F2 shape of RN manuscript/20210122_092608_crop2.png")
+img1 <- readPNG("20210122_092608_crop2.png")
 
-img2 <- readPNG("/Users/u1058369/Dropbox/Pieter/ANU/Wahlenbergia project/F2 experiment 2019/F2 shape of RN manuscript/Fig1b_TGP_image.png")
+img2 <- readPNG("Fig1b_TGP_image.png")
 
 fig1a <- ggplot() + 
     background_image(img1) #+
